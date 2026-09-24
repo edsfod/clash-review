@@ -1,0 +1,24 @@
+# 打 v* 标签时打包发布：工具本身（git 跟踪的文件）加官方的免安装版 Python，做成 zip 挂到 Releases。
+# 打包脚本是 web-kit/pack.py；发布说明取标签的注释（git tag -a v1.2.3 -m "说明"）。
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  zip:
+    # 只在作者的公开仓库里发布（fork 或别处的副本不会自动发布）
+    if: github.repository_owner == 'edsfod'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fetch the annotated tag
+        # checkout 可能只拿到轻量标签，发布说明要取标签的注释，所以把完整的标签对象再取一次
+        run: git fetch --force origin "refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}"
+      - name: Pack
+        run: python3 web-kit/pack.py --name "${{ github.event.repository.name }}" --tag "${{ github.ref_name }}" --out dist
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/*.zip --title "${{ github.event.repository.name }} ${{ github.ref_name }}" --notes-from-tag

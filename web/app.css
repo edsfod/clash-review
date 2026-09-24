@@ -1,0 +1,178 @@
+/* Clash Review 的页面样式。布局为 v2「收件箱」稿：https://claude.ai/artifact/7cA7kA8fjVRUiV6N3LYPCv（第二行）。
+   配色（四套变量块，变量名 --ground … --n3）与显示设置面板的样式在 web-kit 的 kit.css（/kit/kit.css），本文件只写页面样式。 */
+:root {
+  /* 字体、字号、粗细取自 Claude Desktop 在 Windows 上的实际表现（ui-style 第 3 节「字体与字号」）：
+     正文 13px / 1.4；常规 400；只有页标题用 600（中文雅黑只有常规与粗两档，>500 即跳到很粗的 Bold），强调靠颜色 */
+  --sans: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --mono: Consolas, 'Microsoft YaHei UI', monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { font-family: var(--sans); font-size: 13px; line-height: 1.4; background: var(--ground); color: var(--ink);
+  font-variant-numeric: tabular-nums; display: flex; flex-direction: column; overflow: hidden; }
+button, input, select { font: inherit; color: inherit; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--ink3); }
+.grow { flex-grow: 1; }
+.hidden { display: none !important; }
+:focus-visible { outline: 2px solid var(--copper); outline-offset: 1px; }
+
+/* ---------- 顶栏 ---------- */
+header.top { display: flex; align-items: center; gap: 20px; padding: 0 20px; height: 48px; flex-shrink: 0;
+  background: var(--sheet); border-bottom: 1px solid var(--line); }
+.brand { font-size: 14px; font-weight: 600; white-space: nowrap; }
+nav.tabs { display: flex; gap: 2px; align-self: stretch; }
+.tab { display: flex; align-items: center; gap: 8px; padding: 0 14px; color: var(--ink2); text-decoration: none;
+  border-bottom: 2px solid transparent; white-space: nowrap; }
+.tab:hover { color: var(--ink); }
+.tab.on { color: var(--ink); border-bottom-color: var(--copper); }
+.badge { font-family: var(--mono); font-size: 11px; padding: 0 6px; border-radius: 9px; background: var(--surface2); color: var(--ink2); font-weight: 400; }
+.badge.hot { background: var(--copper-soft); color: var(--copper); }
+.status { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--ink2); flex-wrap: wrap; justify-content: flex-end; }
+.st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.st.warn { color: var(--amber); }
+.st.bad { color: var(--crimson); }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.st:not(.warn):not(.bad) .dot { background: var(--teal); }
+.st button { border: 0; background: none; color: inherit; text-decoration: underline; cursor: pointer; padding: 0; font-size: 12px; }
+
+/* ---------- 通用控件 ---------- */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 14px;
+  border-radius: 4px; border: 1px solid var(--line); background: var(--surface2); color: var(--ink); font-size: 13px; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ink3); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn-primary { background: var(--copper); border-color: var(--copper); color: var(--on-copper); }
+.btn-primary:hover { border-color: var(--copper); filter: brightness(1.08); }
+.btn-ghost { background: transparent; border-color: transparent; color: var(--ink2); }
+.btn-ghost:hover { border-color: var(--line); }
+.btn-sm { height: 26px; padding: 0 8px; font-size: 12px; }
+.kbd { font-family: var(--mono); font-size: 11.5px; padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; color: var(--ink2); }
+.btn-primary .kbd { color: inherit; border-color: currentColor; opacity: .7; }
+.acts { display: inline-flex; gap: 4px; }
+.act { height: 28px; min-width: 44px; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; background: transparent;
+  color: var(--ink3); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.act:hover { color: var(--ink); border-color: var(--ink3); }
+.act .k { display: inline-block; min-width: 16px; height: 16px; line-height: 14px; margin-right: 6px; padding: 0 3px;
+  font-family: var(--mono); font-size: 11px; text-align: center; vertical-align: 1px;
+  border: 1px solid currentColor; border-bottom-width: 2px; border-radius: 3px; opacity: .75; }
+.on-proxy { background: var(--teal-soft); color: var(--teal); border-color: var(--teal); }
+.on-direct { background: var(--ink2); color: var(--ground); border-color: var(--ink2); }
+.on-reject { background: var(--crimson-soft); color: var(--crimson); border-color: var(--crimson); }
+.on-ok { background: var(--ink2); color: var(--ground); border-color: var(--ink2); }
+.on-ignore { background: var(--ink3); color: var(--ground); border-color: var(--ink3); }
+/* 中性的选中态（直连 / 正常 / 保持代理 / 忽略）用实心填充：原来的浅灰底在深色下和未选中几乎分不出（2026-09-24） */
+.fld { height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--sheet); color: var(--ink); font-size: 13px; outline: none; }
+.fld:focus { border-color: var(--copper); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; flex-shrink: 0; }
+.seg button { height: 30px; padding: 0 12px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--ink2);
+  font-size: 13px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.seg button:first-child { border-left: 0; }
+.seg button.on { background: var(--surface2); color: var(--ink); }
+.seg .n { font-family: var(--mono); font-size: 11px; color: var(--ink3); }
+.link { border: 0; background: transparent; color: var(--ink3); font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
+.link:hover { color: var(--ink); background: var(--surface2); }
+.link-del:hover { color: var(--crimson); }
+.chip { font-family: var(--mono); font-size: 12px; color: var(--ink2); padding: 1px 7px; border: 1px solid var(--line); border-radius: 3px; }
+.chip.hit { color: var(--copper); border-color: var(--copper); }
+
+/* ---------- 页面骨架：页头 + 可滚动列表 + 底部操作栏 ---------- */
+#page { flex-grow: 1; display: flex; flex-direction: column; min-height: 0; }
+.phead { display: flex; align-items: center; gap: 16px; padding: 14px 20px 12px 20px; flex-shrink: 0; flex-wrap: wrap; }
+.phead h1 { margin: 0; font-size: 16px; font-weight: 600; white-space: nowrap; }
+.hint { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--ink3); flex-wrap: wrap; }
+.list { flex-grow: 1; overflow: auto; border-top: 1px solid var(--line); background: var(--surface); }
+.ghead { display: flex; gap: 10px; align-items: center; padding: 14px 20px 6px 20px; font-size: 12px; color: var(--ink3); }
+.ghead b { color: var(--ink); font-weight: inherit; }
+.row { display: grid; align-items: start; column-gap: 16px; padding: 9px 20px; border-top: 1px solid var(--line2); }
+.row:hover { background: var(--sheet); }
+.row.focus, .row.focus:hover { background: var(--surface2); }
+.host { font-family: var(--mono); font-size: 13px; color: var(--ink); word-break: break-all; }
+.sub { font-size: 12px; color: var(--ink2); margin-top: 2px; }
+.sub .p { color: var(--ink); }
+.meta { font-family: var(--mono); font-size: 12px; color: var(--ink2); text-align: right; padding-top: 2px; white-space: nowrap; }
+.meta.dim { color: var(--ink3); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.r-inbox { grid-template-columns: max-content minmax(0,1fr) 64px 96px; }
+.r-routed { grid-template-columns: max-content minmax(0,1fr) 48px 44px 80px; }
+.r-entry { grid-template-columns: minmax(0,1fr) auto; align-items: center; padding: 6px 20px; }
+.r-audit { grid-template-columns: 44px minmax(0,1fr) auto; align-items: center; padding: 6px 20px; }
+.empty { padding: 80px 20px; text-align: center; color: var(--ink3); }
+.bar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; border-top: 1px solid var(--line); background: var(--sheet); flex-shrink: 0; flex-wrap: wrap; }
+.result { display: flex; flex-direction: column; gap: 3px; padding: 10px 20px; border-top: 1px solid var(--line); background: var(--teal-soft);
+  font-size: 12px; flex-shrink: 0; max-height: 30vh; overflow: auto; position: relative; }
+.result .k { color: var(--teal); margin-right: 8px; }
+.result .k.warn { color: var(--amber); }
+.result .x { position: absolute; right: 12px; top: 6px; }
+
+/* 规则页：左栏规则集 */
+.split { flex-grow: 1; display: flex; min-height: 0; }
+nav.sets { width: 250px; flex-shrink: 0; padding: 14px 10px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; background: var(--sheet); overflow: auto; }
+.set { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 1px 8px; width: 100%; text-align: left; padding: 9px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--ink); cursor: pointer; }
+.set:hover { background: var(--surface2); }
+.set.on { background: var(--surface2); box-shadow: inset 0 0 0 1px var(--copper); }
+.pane { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; background: var(--surface); }
+form.add { display: flex; gap: 8px; align-items: center; padding: 10px 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--sheet); flex-wrap: wrap; }
+
+/* ---------- 说明弹窗 ---------- */
+.help-btn { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 13px;
+  background: transparent; color: var(--ink2); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.help-btn:hover { color: var(--ink); border-color: var(--ink3); }
+dialog.help { width: min(760px, calc(100vw - 40px)); max-height: calc(100vh - 80px); padding: 0; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--ink); }
+dialog.help::backdrop { background: rgba(0, 0, 0, .5); }
+dialog.help .hd { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); }
+dialog.help .hd h2 { margin: 0; font-size: 15px; font-weight: 600; }
+dialog.help .bd { padding: 6px 20px 18px 20px; font-size: 13px; line-height: 1.7; }
+dialog.help h3 { margin: 16px 0 4px 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+dialog.help p { margin: 4px 0; color: var(--ink2); }
+dialog.help dl { margin: 4px 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; }
+dialog.help dt { color: var(--ink); white-space: nowrap; }
+dialog.help dd { margin: 0; color: var(--ink2); }
+dialog.help b { font-weight: 400; color: var(--copper); }
+dialog.help code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+
+.toast { position: fixed; right: 20px; bottom: 72px; max-width: 520px; padding: 10px 14px; border-radius: 4px; z-index: 20;
+  background: var(--crimson-soft); color: var(--crimson); border: 1px solid var(--crimson); }
+
+/* ---------- 窄窗口（半屏以下）：列表行改两行 ---------- */
+@media (max-width: 1024px) {
+  .status .opt { display: none; }
+  .r-inbox, .r-routed { grid-template-columns: minmax(0,1fr) auto; row-gap: 6px; }
+  .r-inbox > .acts, .r-routed > .acts { grid-column: 1 / -1; }
+  .r-inbox > .meta.dim, .r-routed > .meta.cnt { display: none; }
+  nav.sets { width: 200px; }
+}
+@media (max-width: 720px) {
+  header.top { height: auto; flex-wrap: wrap; padding: 6px 12px; gap: 8px; }
+  .status { flex-basis: 100%; justify-content: flex-start; }
+  .split { flex-direction: column; }
+  nav.sets { width: auto; flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); }
+  nav.sets .set { width: auto; flex: 1 1 160px; }
+}
+
+
+/* ---------- 推荐与理由（三层并排，只作提示，从不替人选择）----------
+   推荐是预测，按 ui-style 配色纪律用铜色，只写在行内的「推荐 X」标签上；按钮不加描边（2026-09-24 起，按钮上的强调色和选中态混在一起）。
+   分歧用琥珀（预警）；名单收录用绛红字（异常）但只是小标签，不铺底色。 */
+.tag { display: inline-block; font-size: 11.5px; line-height: 16px; padding: 0 6px; border-radius: 3px; border: 1px solid var(--line);
+  color: var(--ink2); margin-right: 6px; white-space: nowrap; vertical-align: 1px; }
+.tag.list { color: var(--crimson); border-color: var(--crimson-soft); }
+.tag.rec { color: var(--copper); border-color: var(--copper); }
+.tag.split { color: var(--amber); border-color: var(--amber); background: var(--amber-soft); }
+.tag.busy { color: var(--ink3); border-style: dashed; }
+.row.dim .host, .row.dim .sub { opacity: .6; }
+.host .what { font-family: var(--sans); color: var(--ink2); margin-left: 10px; font-size: 12.5px; }
+.why-btn { border: 1px solid var(--line); background: transparent; color: var(--ink3); font-size: 12px; height: 22px; padding: 0 8px;
+  border-radius: 3px; cursor: pointer; margin-left: 8px; vertical-align: 1px; }
+.why-btn:hover { color: var(--ink); border-color: var(--ink3); }
+.why { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--sheet);
+  display: grid; grid-template-columns: 44px minmax(0,1fr); gap: 6px 12px; font-size: 12.5px; color: var(--ink2); }
+.why .lh { color: var(--ink3); }
+.why .ln { color: var(--ink); }
+.why .opt { display: grid; grid-template-columns: 40px 34px minmax(0,1fr); gap: 2px 8px; }
+.why .opt .c { font-family: var(--mono); text-align: right; color: var(--ink2); }
+.why .opt .top { color: var(--copper); }
+.why .err { color: var(--amber); }
+.why .foot { grid-column: 1 / -1; color: var(--ink3); font-size: 12px; border-top: 1px solid var(--line2); padding-top: 6px; }
+.gen { font-size: 12px; color: var(--ink3); }

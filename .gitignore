@@ -1,0 +1,10 @@
+# 本机运行产物与改动前备份
+var/
+__pycache__/
+*.pyc
+# 个人设置（格式样例见 settings.example.json）
+settings.json
+# 便携模式标记（见 web-kit/tooldirs.py）
+portable
+# 不外发名单（个人）：调模型时不发送的主机
+no_send.txt

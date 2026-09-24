@@ -1,0 +1,58 @@
+{
+ "_说明": "web-kit 显示设置的唯一取值来源：四套配色（每套一组完整的取值）、灰字亮度四档、可选字体、出厂值。kit.css 的配色块、kit.js 的配色列表、webkit.py 的白名单都由本文件生成，不另抄。暖炭 / 象牙取自作者另一个项目的配色（tokens.css），按角色映射：ground←bg，sheet←hover，surface/surface2←同名，line←line，line2←surface2，ink/ink2/ink3←fg/fg2/fg3，teal←ok，copper←acc，on-copper←on-acc，amber←warn，crimson←bad，各 -soft←对应 -soft，n3←fg2。",
+ "factory": {"scheme": "shenqing", "font": "Segoe UI Variable Text", "weight": 400, "ink": 0},
+ "fonts": [
+  ["Segoe UI Variable Text", "Segoe UI Variable（默认）"],
+  ["Segoe UI Variable Small", "Segoe UI Variable Small"],
+  ["Segoe UI", "Segoe UI 静态版"],
+  ["Bahnschrift", "Bahnschrift"],
+  ["Tahoma", "Tahoma"],
+  ["Verdana", "Verdana"],
+  ["Arial", "Arial"]
+ ],
+ "weight": [300, 500],
+ "vars": ["ground", "sheet", "surface", "surface2", "line", "line2", "ink", "ink2", "ink3",
+          "teal", "teal-soft", "copper", "copper-soft", "on-copper", "amber", "amber-soft", "crimson", "crimson-soft", "n3"],
+ "schemes": [
+  {
+   "id": "shenqing", "name": "深青", "theme": "dark", "pair": "qingci",
+   "desc": "冷调深蓝绿黑，青绿 + 铜", "source": "ui-style 第 4 节深色（原「青铜」）",
+   "swatch": ["#0E1619", "#18262B", "#4FB3AA", "#DB8D62"],
+   "tokens": {"ground": "#0E1619", "sheet": "#131E22", "surface": "#18262B", "surface2": "#1F3036", "line": "#2A3C43", "line2": "#223238",
+              "ink": "#E6EDEC", "ink2": "#A9BEC2", "ink3": "#8AA1A8",
+              "teal": "#4FB3AA", "teal-soft": "#12312F", "copper": "#DB8D62", "copper-soft": "#3A2419", "on-copper": "#1A0F09",
+              "amber": "#D9A93C", "amber-soft": "#33280D", "crimson": "#D97070", "crimson-soft": "#361B1B", "n3": "#86A5AC"},
+   "ink": [["#A9BEC2", "#8AA1A8"], ["#BACBCE", "#9BB0B6"], ["#CBD8DA", "#AABDC2"], ["#DCE5E6", "#BCCBCF"]]
+  },
+  {
+   "id": "qingci", "name": "青瓷", "theme": "light", "pair": "shenqing",
+   "desc": "冷灰青白，墨青 + 赭铜", "source": "ui-style 第 4 节浅色",
+   "swatch": ["#EEF2F2", "#FFFFFF", "#15716C", "#B0603A"],
+   "tokens": {"ground": "#EEF2F2", "sheet": "#F7F9F9", "surface": "#FFFFFF", "surface2": "#F1F4F4", "line": "#D3DEDE", "line2": "#E4EBEB",
+              "ink": "#16242A", "ink2": "#41565E", "ink3": "#6A7F87",
+              "teal": "#15716C", "teal-soft": "#D7E9E7", "copper": "#B0603A", "copper-soft": "#F0DED4", "on-copper": "#FFFFFF",
+              "amber": "#B7830F", "amber-soft": "#F6E9C9", "crimson": "#A63A3A", "crimson-soft": "#F3DADA", "n3": "#41565E"},
+   "ink": [["#41565E", "#6A7F87"], ["#34474E", "#5A6E76"], ["#283A41", "#4B5F67"], ["#1D2D33", "#3F525A"]]
+  },
+  {
+   "id": "nuantan", "name": "暖炭", "theme": "dark", "pair": "xiangya",
+   "desc": "暖近黑，珊瑚强调", "source": "作者另一个项目的深色配色",
+   "swatch": ["#1b1a18", "#262523", "#86c34e", "oklch(74% 0.108 44)"],
+   "tokens": {"ground": "#1b1a18", "sheet": "#2e2d29", "surface": "#262523", "surface2": "#30302c", "line": "#3e3c37", "line2": "#30302c",
+              "ink": "#f2efe8", "ink2": "#b3aea4", "ink3": "#8e887e",
+              "teal": "#86c34e", "teal-soft": "#1d2617", "copper": "oklch(74% 0.108 44)", "copper-soft": "oklch(28% 0.045 44)", "on-copper": "#1b1a18",
+              "amber": "#dca63f", "amber-soft": "#272016", "crimson": "#e2726a", "crimson-soft": "#2b1a19", "n3": "#b3aea4"},
+   "ink": [["#b3aea4", "#8e887e"], ["#c0bbb2", "#9d978d"], ["#cdc9c1", "#aca69d"], ["#dad7d0", "#bcb7ae"]]
+  },
+  {
+   "id": "xiangya", "name": "象牙", "theme": "light", "pair": "nuantan",
+   "desc": "暖米白，墨字，珊瑚强调", "source": "作者另一个项目的浅色配色",
+   "swatch": ["#faf9f5", "#ffffff", "#4a7b00", "oklch(53% 0.128 44)"],
+   "tokens": {"ground": "#faf9f5", "sheet": "#f5f2ec", "surface": "#ffffff", "surface2": "#f2f0ea", "line": "#e0ddd1", "line2": "#f2f0ea",
+              "ink": "#141413", "ink2": "#3d3d3a", "ink3": "#757168",
+              "teal": "#4a7b00", "teal-soft": "#f1f7e8", "copper": "oklch(53% 0.128 44)", "copper-soft": "oklch(96.5% 0.018 44)", "on-copper": "#ffffff",
+              "amber": "#8a5a00", "amber-soft": "#fbf6ea", "crimson": "#b03a30", "crimson-soft": "#f9eded", "n3": "#3d3d3a"},
+   "ink": [["#3d3d3a", "#757168"], ["#333331", "#66625a"], ["#292927", "#57534c"], ["#1f1f1e", "#48453f"]]
+  }
+ ]
+}

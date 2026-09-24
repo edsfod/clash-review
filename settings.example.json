@@ -1,0 +1,21 @@
+{
+  "_说明": "复制为设置目录里的 settings.json（%APPDATA%\\clash-review\\settings.json；便携模式下是工具目录），只留要改的键（留下的键会覆盖自动检测）。文件不在时全部自动检测。各键的意思见 README「可迁移」。",
+  "config_dir": "C:/Users/<你>/AppData/Roaming/io.github.clash-verge-rev.clash-verge-rev",
+  "rulesets": {
+    "domain": {
+      "reject": "my-reject",
+      "direct": "my-direct",
+      "proxy": "my-proxy"
+    },
+    "ip": {
+      "reject": "my-reject-ip",
+      "direct": "my-direct-ip",
+      "proxy": "my-proxy-ip"
+    }
+  },
+  "proxy_group": "节点选择",
+  "fallback_hosts": {
+    "example.com": "别的工具经本机代理回退时要访问它"
+  },
+  "deepseek_key_file": "C:/path/to/deepseek-api-key.txt"
+}

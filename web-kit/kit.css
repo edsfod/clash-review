@@ -1,0 +1,25 @@
+/* web-kit 的样式：只有两样与页面内容无关的东西。
+   一、四套配色的变量块：由 webkit.py 在送出本文件时从 schemes.json 生成，替换下面这一行注释（唯一来源是 schemes.json，别在这里手写取值）。
+   二、显示设置面板与其中的配色列表。面板里的按钮、链接、灰字用各工具自己的 .btn / .btn-ghost / .btn-sm / .link / .muted / .grow，
+      以及变量 --mono；接入的工具须提供这些类（见 README「接入清单」）。
+   页面样式（列表行、按钮、标签、布局）不在这里，由各工具自己的 app.css 定。 */
+/*@@SCHEME_BLOCKS@@*/
+
+/* ---------- 显示设置面板（顶栏调节按钮） ---------- */
+.disp { position: fixed; right: 16px; top: 52px; z-index: 30; width: 340px; max-width: calc(100vw - 24px); padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.35); font-size: 12px; display: flex; flex-direction: column; gap: 10px; }
+.disp label { display: grid; grid-template-columns: 64px 1fr 40px; gap: 8px; align-items: center; color: var(--ink2); }
+.disp select, .disp input[type=range] { width: 100%; }
+.disp select { height: 28px; background: var(--sheet); border: 1px solid var(--line); border-radius: 3px; }
+.disp output { font-family: var(--mono); color: var(--ink); text-align: right; }
+/* 配色列表：每项一行，色块 + 名字 + 一句说明；选中项实心填充 */
+.disp .schemes { display: grid; grid-template-columns: 1fr; gap: 4px; }
+.disp .sch { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 8px; align-items: center;
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--ink); cursor: pointer; text-align: left; }
+.disp .sch:hover { border-color: var(--ink3); }
+.disp .sch.on { background: var(--ink2); border-color: var(--ink2); color: var(--ground); }
+.disp .sch .sw { grid-row: 1 / 3; display: inline-flex; border-radius: 3px; overflow: hidden; border: 1px solid rgba(128, 128, 128, .45); }
+.disp .sch .sw i { display: block; width: 8px; height: 22px; }
+.disp .sch .nm { font-size: 12.5px; }
+.disp .sch .ds { font-size: 11px; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.disp .sch.on .ds { color: inherit; opacity: .8; }
