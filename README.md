@@ -41,12 +41,14 @@ python clash_review.py watch            # 默认每 200 条连接日志落盘一
 # 同一次访问带出的漏网项归为一组；每项附 procs（发起进程）与 ctx（前后相邻连接的主机）
 python clash_review.py list
 
-# 核对：六个规则集的改动是否已被内核加载（比对条目数与修改时间）、find-process-mode、
-# iptoasn.com 与 settings.json 的 fallback_hosts 是否在代理规则集（工具代理回退要用）、watch 是否在跑、待审数量、
+# 核对：收件箱（六个 type: file 规则集）的改动是否已被内核加载（比对条目数与修改时间）；
+# 其它规则集（type: http 等，只读）是否已加载、本地缓存与内核的条目数是否一致；find-process-mode、
+# iptoasn.com 与 settings.json 的 fallback_hosts 按规则顺序是否先命中代理规则集（工具代理回退要用）、watch 是否在跑、待审数量、
 # 规则集与代理组是否从 Clash 配置读到、兜底是否 MATCH,REJECT。有问题退出码 1
 python clash_review.py status
 
-# 体检六个规则集：冗余条目、残留占位、保留域名（.invalid/.example）、跨类重叠、父域合并候选
+# 体检：收件箱的冗余条目（含已并入 http 规则集的）、残留占位、保留域名（.invalid/.example）、
+# 全部规则集之间的跨类重叠、父域合并候选
 python clash_review.py tidy            # 只读
 python clash_review.py tidy --apply    # 只删冗余条目与残留占位（删除后匹配行为不变）
 
@@ -152,7 +154,7 @@ mihomo 内核日志流（命名管道 /logs）→ watch 提取 MATCH→REJECT �
 
 "漏网"的判定：连接出口为 `REJECT` 且匹配规则为最终 `MATCH`。自动排除 `my-reject` / 去广告等"故意拒绝"、以及 DIRECT 失败等噪声。**域名与纯 IP 两类都收**（IP 仅排除私有/保留/回环/组播/fake-ip 段等噪声）；这正是 Telegram 这类"按 IP 直连、无域名"的连接得以被发现的关键——旧版把纯 IP 当噪声丢弃，故对 Telegram 完全失明。
 
-已被六个规则集覆盖的域名/IP 不会再进入待审或地域放行清单；watch 每次落盘时会重读规则集，期间刚归类的条目也不会被并回。
+已被规则集覆盖的域名/IP 不会再进入待审或地域放行清单（收件箱与只读的 http 规则集都算，见第四节）；watch 每次落盘时会重读规则集，期间刚归类的条目也不会被并回。
 
 ### 审查上下文
 
@@ -221,9 +223,10 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 
 `promote`、网页的归类/改分类/手动新增都经同一写入函数，写入前：
 
-- 目标已被本类现有条目覆盖 → 不写入，提示；
-- 新条目覆盖了本类已有的更小范围条目 → 这些旧条目一并移除，提示；
-- 目标与另外两类有重叠 → 只提示哪一类生效（规则顺序 拉黑 → 直连 → 代理），不改另外两类；
+- 目标已被本类收件箱的现有条目覆盖，或按规则顺序先命中的是本类的只读规则集（如 http 规则集里已有）→ 不写入，提示；
+- 新条目覆盖了本类收件箱已有的更小范围条目 → 这些旧条目一并移除，提示；
+- 目标与另外两类（收件箱与只读规则集都算）有重叠 → 只提示哪个规则集生效（按 `rules` 里的顺序），不改别的规则集；
+- 只读规则集读不到（本地缓存不在等）→ 照常写入，提示哪些没算进去；
 - 写入真实条目时去掉残留的占位条目。
 
 父域合并不自动做：`tidy` 列出同一父域下 ≥3 个子主机的候选，由人确认。简单取「最后两段」会误判大站与公共后缀（如 `microsoft.com` 下的遥测域名、免费子域服务 `qzz.io`）。确认后 `promote --<类> <父域>`，被覆盖的子条目会自动移除。
@@ -309,12 +312,15 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 
 | 读什么 | 怎么认 | 读不到时 |
 |---|---|---|
-| 六个规则集的名字与文件 | `rules` 里的 `RULE-SET,<名字>,<去向>`，去向 `REJECT` / `REJECT-DROP` 为拉黑、`DIRECT` 为直连、其它（代理组名）为代理；`rule-providers` 里该名字的 `behavior`（`domain` / `ipcidr`）与 `path`，只认 `type: file`。每类取规则里第一个 | 按默认名 `my-<类>[-ip]` 猜，`status` 报「按默认名猜的」 |
-| 先后顺序（同一目标落在两类时谁生效） | 上面那些 `RULE-SET` 行的顺序 | 拉黑 → 直连 → 代理 |
+| 收件箱（写入的六个规则集）的名字与文件 | `rules` 里的 `RULE-SET,<名字>,<去向>`，去向 `REJECT` / `REJECT-DROP` 为拉黑、`DIRECT` 为直连、其它（代理组名）为代理；`rule-providers` 里该名字的 `behavior`（`domain` / `ipcidr`）与 `path`，只认 `type: file`。每类（域名 / IP × 三类）取规则里第一个 | 按默认名 `my-<类>[-ip]` 猜，`status` 报「按默认名猜的」 |
+| 只读规则集（「已有规则」一并算进去，从不写入） | 其余 `behavior` 为 `domain` / `ipcidr`、`type` 为 `file` 或 `http` 的 `RULE-SET`。`http` 的读 `path` 处的本地缓存（相对配置目录），`format` 支持 `yaml` 与 `text`；`classical` 与 `mrs` 不读 | 缓存不在、没写 `path`、格式读不了：跳过，`status` 报出来，写入时提示没算进去 |
+| 先后顺序（同一目标落在多个规则集时谁生效） | 上面那些 `RULE-SET` 行的顺序 | 收件箱按 拉黑 → 直连 → 代理，排在只读规则集之前 |
 | 代理组（线路探测记录当前节点） | 代理规则集的去向 | 不记节点（写 `?`） |
 | 兜底 | `MATCH,<去向>` | `status` 报：不是 `MATCH,REJECT` 就没有「漏网」 |
 | 内核管道 | `external-controller-pipe`；它不存在时再找 `\\.\pipe\verge-mihomo-*`（本机 yaml 里写的是 `sidecar-release`，实际在跑的是 `production`） | 报「找不到内核管道」，写明找了什么、可能是 Clash Verge 没运行或不是 2.5.x |
 | mixed-port | `mixed-port` | 7897（Clash Verge 的默认值） |
+
+只读规则集的本地缓存不一定是内核在用的那份：Clash Verge 2.5.x 的服务模式下，内核的工作目录在 `C:\ProgramData\clash-verge-service\users\<哈希>\runtime\`（普通用户读不到），按网址取来的文件写在那里，配置目录 `path` 处的文件内核不再更新（2026-09-25 实测：内核重新取到 167 条，配置目录的缓存仍是 166 条）。`status` 按条目数比对，不一致就报出来，这时「已有规则」按旧缓存判断。要让它跟上，由分发规则的一方在更新线上文件时把同一份文件写到 `path` 处。
 
 检测出的不对时，在 `settings.json` 里覆盖：`rulesets`（`{"domain": {"reject": 名字, …}, "ip": {…}}`，文件按 `<配置目录>/ruleset/<名字>.yaml`）、`proxy_group`。另有 `fallback_hosts`（别的工具经本机代理回退时要访问、`status` 要检查的域名）与 `deepseek_key_file`。
 
@@ -414,4 +420,5 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 
 ## 修订记录
 
+- 2026-09-25（v1.1.0）：「已有规则」改为看 Clash 配置里全部 `domain` / `ipcidr` 规则集（`type: file` 与 `type: http`，按 `rules` 顺序），`http` 的读 `path` 处的本地缓存，读不到的跳过并报出；写入仍只写收件箱（每类第一个 `type: file`）。涉及：漏网是否已覆盖、写入前的冗余与重叠提示、`tidy`（收件箱条目已并入 http 规则集时列为可清理；跨类重叠写出规则集名）、`rejects`（http 拉黑规则集的命中也计入）、回退域名检查（按规则顺序先命中的须是代理类）、网页的同站条目。`status` 分列收件箱与其它规则集（内核的 `vehicleType`、`ruleCount`，本地缓存条数）。只有收件箱时行为不变：旧版与新版在同一份配置上跑 `tidy`、`promote`、`tidy --apply`、`list`、`rejects`，输出与写出的文件逐字相同。另修：`--config-dir` 写在子命令前面时被忽略、退回自动定位的配置目录；读规则集与清单后未及时关闭文件。加 `tests/`（`python -m unittest discover -s tests`）。
 - 2026-09-24（v1.0.0）：首次公开发布。此前在作者的私有工作区里开发，历史不随公开仓库发布。

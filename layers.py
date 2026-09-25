@@ -24,7 +24,7 @@ def layer1(host, ctx=None, payloads=None):
         t = cr.load_traffic(ctx)["hosts"].get(host)
         tl = cr.traffic_line(t)
         if tl: lines.append(tl)
-        payloads = payloads or {c: cr.load_payload(os.path.join(ctx.ruleset, ctx.dom_files[c])) for c in ("proxy", "direct", "reject")}
+        payloads = payloads or {c: ctx.entries("domain", c) for c in ("proxy", "direct", "reject")}
     ss = evidence.same_site(host, payloads) if payloads else []
     if ss: lines.append("同站主机在规则集里的归类：" + "，".join(ss[:8]))
     return {"evidence": ev, "lines": lines, "same_site": ss}

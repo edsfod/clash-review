@@ -284,7 +284,7 @@ def api_advice_run(ctx, body):
     jid = uuid.uuid4().hex[:12]; single = len(items) == 1
     job = {"total": len(items), "done": 0, "results": {}, "errors": {}, "running": True}
     _JOBS[jid] = job
-    payloads = {c: cr.load_payload(os.path.join(ctx.ruleset, ctx.dom_files[c])) for c in ("proxy", "direct", "reject")}
+    payloads = {c: ctx.entries("domain", c) for c in ("proxy", "direct", "reject")}
     def one(it):
         try:
             r = layers.explain_item(it, ctx, payloads, model=True, include_ctx=single)
@@ -347,7 +347,7 @@ def api_todirect_test(ctx, body):
     items = [x for x in cr.direct_candidates(ctx) if x[0] in want]
     if not items: raise ApiError("这些主机已不在候选里（刷新后再试）")
     proxy = cr.mixed_port_url(ctx); ph = advisor.prompt_hash()
-    payloads = {c: cr.load_payload(os.path.join(ctx.ruleset, ctx.dom_files[c])) for c in ("proxy", "direct", "reject")}
+    payloads = {c: ctx.entries("domain", c) for c in ("proxy", "direct", "reject")}
     jid = uuid.uuid4().hex[:12]
     job = {"total": len(items), "done": 0, "results": {}, "errors": {}, "running": True}
     _JOBS[jid] = job

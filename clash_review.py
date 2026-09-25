@@ -82,10 +82,12 @@ def settings():
 # 配置目录的 clash-verge.yaml，其中：
 #   rules:           - RULE-SET,<名字>,<去向>   去向 REJECT / REJECT-DROP → 拉黑，DIRECT → 直连，其它（代理组名）→ 代理
 #                    - MATCH,<去向>             漏网审查的前提是它为 REJECT
-#   rule-providers:  <名字>: behavior domain / ipcidr，path 为文件
+#   rule-providers:  <名字>: behavior domain / ipcidr，type file / http，path 为文件（http 的是内核取来的本地缓存）
 #   external-controller-pipe / mixed-port
-# 每类（域名 / IP × 拉黑 / 直连 / 代理）取规则里第一个 type: file 的规则集。settings.json 的 rulesets / proxy_group
-# 可覆盖；两处都没有的按默认名 my-<类>[-ip] 猜，status 会报出来。
+# 写入的地方（收件箱）：每类（域名 / IP × 拉黑 / 直连 / 代理）取规则里第一个 type: file 的规则集。settings.json 的
+# rulesets / proxy_group 可覆盖；两处都没有的按默认名 my-<类>[-ip] 猜，status 会报出来。
+# 「已有规则」（漏网是否已覆盖、写入前的冗余与重叠、体检、回退域名是否放行）看规则里全部 domain / ipcidr 规则集，
+# 按规则顺序：收件箱之外的（http 规则集、其它 file 规则集）只读不写，http 的读 path 处的本地缓存，读不到的跳过并提示。
 CATS = ("reject", "direct", "proxy")
 DEFAULT_NAMES = {"domain": {c: f"my-{c}" for c in CATS}, "ip": {c: f"my-{c}-ip" for c in CATS}}
 
@@ -96,7 +98,7 @@ def _yaml_scalar(v):
 
 def detect_layout(cfg):
     out={"sets":{"domain":{}, "ip":{}}, "order":{"domain":[], "ip":[]}, "proxy_group":None, "match":None,
-         "pipe":None, "mixed_port":None, "found":False}
+         "pipe":None, "mixed_port":None, "found":False, "all":[]}
     try:
         with open(os.path.join(cfg, "clash-verge.yaml"), encoding="utf-8") as f: text=f.read()
     except OSError:
@@ -118,17 +120,20 @@ def detect_layout(cfg):
         elif sect=="rules":
             m=re.match(r"^\s*-\s*['\"]?([^'\"]+?)['\"]?\s*$", line)
             if m: rules.append([x.strip() for x in m.group(1).split(",")])
-    for r in rules:
+    for rank, r in enumerate(rules):
         if r[0].upper()=="MATCH" and len(r)>1: out["match"]=r[1]
         if r[0].upper()!="RULE-SET" or len(r)<3: continue
         name, target = r[1], r[2]
         p=provs.get(name) or {}
         kind={"domain":"domain", "ipcidr":"ip"}.get(p.get("behavior", "").lower())
-        if not kind or p.get("type", "file")!="file" or not p.get("path"): continue
+        typ=p.get("type", "file").lower()
+        if not kind or typ not in ("file", "http"): continue
         cat="reject" if target.upper() in ("REJECT", "REJECT-DROP") else "direct" if target.upper()=="DIRECT" else "proxy"
-        if cat in out["sets"][kind]: continue
-        path=p["path"]
-        if not os.path.isabs(path): path=os.path.normpath(os.path.join(cfg, path))
+        path=p.get("path") or None
+        if path and not os.path.isabs(path): path=os.path.normpath(os.path.join(cfg, path))
+        out["all"].append({"name":name, "kind":kind, "cat":cat, "type":typ, "path":path,
+                           "format":(p.get("format") or "yaml").lower(), "rank":rank})
+        if typ!="file" or not path or cat in out["sets"][kind]: continue
         out["sets"][kind][cat]={"name":name, "path":path}
         out["order"][kind].append(cat)
         if cat=="proxy" and not out["proxy_group"]: out["proxy_group"]=target
@@ -212,14 +217,15 @@ def load_payload(path):
     items=[]
     if not os.path.exists(path): return items
     inpayload=False
-    for line in open(path, encoding="utf-8"):
-        s=line.rstrip("\n")
-        if re.match(r'^\s*payload\s*:', s): inpayload=True; continue
-        if inpayload:
-            m=re.match(r'\s*-\s*["\']?([^"\'#]+?)["\']?\s*$', s)
-            if m: items.append(m.group(1).strip())
-            elif s.strip() and not s.strip().startswith("#") and not s.startswith(" "):
-                inpayload=False
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            s=line.rstrip("\n")
+            if re.match(r'^\s*payload\s*:', s): inpayload=True; continue
+            if inpayload:
+                m=re.match(r'\s*-\s*["\']?([^"\'#]+?)["\']?\s*$', s)
+                if m: items.append(m.group(1).strip())
+                elif s.strip() and not s.strip().startswith("#") and not s.startswith(" "):
+                    inpayload=False
     return items
 
 def norm_domain(domain):
@@ -281,7 +287,8 @@ def _load_sections(path, sections):
     data={s:{} for s in sections}
     if not os.path.exists(path): return data
     secset=set(sections); section=None; cur=None
-    for line in open(path, encoding="utf-8", errors="ignore"):
+    with open(path, encoding="utf-8", errors="ignore") as f: lines=f.readlines()
+    for line in lines:
         m0=re.match(r'^(\w+):\s*$', line)
         if m0 and m0.group(1) in secset:
             section=m0.group(1); cur=None; continue
@@ -402,9 +409,81 @@ class Ctx:
         # 先后顺序（同一目标落在多类时谁生效）：按规则里的顺序，检测不全时退回 拉黑 → 直连 → 代理
         self.order={k: (tuple(lay["order"][k]) if len(lay["order"][k])==3 else CAT_ORDER) for k in ("domain", "ip")}
         self.proxy_group=st.get("proxy_group") or lay["proxy_group"]
+        # 全部规则集（收件箱 + 只读的 http / 其它 file 规则集），按规则顺序
+        self.sets=self._all_sets(lay); self.unreadable={}
         global LOCAL_PROXY, PIPE_HINT
         LOCAL_PROXY=f"http://127.0.0.1:{lay['mixed_port']}" if lay["mixed_port"] else None
         PIPE_HINT=lay["pipe"]
+
+    def _all_sets(self, lay):
+        """[{name, kind, cat, type, path, format, rank, inbox}]，按 rank（规则里的位置）排序。
+        收件箱在规则里找全了就用规则里的位置；找不全（按默认名猜的、settings.json 指定的）就按 self.order 排在最前，与只看收件箱时的先后一致。"""
+        inbox={(k, c): (self.names[k][c], (self.dom_files if k=="domain" else self.ip_files)[c]) for k in ("domain", "ip") for c in CATS}
+        out=[]; seen=set()
+        for s in lay["all"]:
+            if s["name"] in seen: continue       # 同一规则集在规则里出现多次，以第一次为准
+            seen.add(s["name"])
+            mine=inbox[(s["kind"], s["cat"])][0]==s["name"]
+            out.append(dict(s, inbox=mine, path=inbox[(s["kind"], s["cat"])][1] if mine else s["path"]))
+        for kind in ("domain", "ip"):
+            if sum(1 for s in out if s["inbox"] and s["kind"]==kind)==len(CATS): continue
+            out=[s for s in out if not (s["inbox"] and s["kind"]==kind)]
+            for i, cat in enumerate(self.order[kind]):
+                name, path = inbox[(kind, cat)]
+                out=[s for s in out if s["name"]!=name]
+                out.append({"name":name, "kind":kind, "cat":cat, "type":"file", "path":path, "format":"yaml",
+                            "rank":-len(CATS)+i, "inbox":True})
+        return sorted(out, key=lambda s: s["rank"])
+
+    def sets_of(self, kind, cat=None):
+        return [s for s in self.sets if s["kind"]==kind and (cat is None or s["cat"]==cat)]
+
+    def payloads(self, kind, cat=None):
+        """[(规则集, 条目)]，按规则顺序，占位已去掉。只读规则集读不到的记进 self.unreadable（名字 → 原因）并跳过。"""
+        out=[]
+        for s in self.sets_of(kind, cat):
+            items, err = read_set(s)
+            if err and not s["inbox"]: self.unreadable[s["name"]]=err; continue
+            self.unreadable.pop(s["name"], None)      # 网页与 watch 常驻：缓存后来有了就不再提示
+            out.append((s, items))
+        return out
+
+    def entries(self, kind, cat):
+        """某一类在全部规则集里的条目（收件箱在内），占位已去掉。"""
+        return [p for _, items in self.payloads(kind, cat) for p in items]
+
+    def unreadable_note(self, kind=None):
+        bad=[f"{n}（{why}）" for n, why in self.unreadable.items() if kind is None or any(s["name"]==n and s["kind"]==kind for s in self.sets)]
+        return "这些规则集读不到，没算进去：" + "；".join(bad) if bad else None
+
+def read_set(s):
+    """读一个规则集的条目，去掉占位。返回 (条目, 读不到的原因或 None)。收件箱文件不在时返回空表（与旧版一致，写入时新建）。"""
+    path=s.get("path")
+    if not path: return [], "profile 里没写 path，找不到本地缓存"
+    if not os.path.exists(path):
+        return [], (f"文件不在：{path}" if s["type"]=="file" else f"本地缓存不在：{path}")
+    fmt=s.get("format") or "yaml"
+    if fmt not in ("yaml", "text"): return [], f"{fmt} 格式读不了"
+    try:
+        if fmt=="yaml": items=load_payload(path)
+        else:
+            with open(path, encoding="utf-8") as f:
+                items=[l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
+    except (OSError, UnicodeDecodeError) as e:
+        return [], f"读不了：{e}"
+    return strip_placeholder(items, s["kind"]), None
+
+def strip_placeholder(items, kind):
+    if kind=="domain": return [p for p in items if p!=DOMAIN_PLACEHOLDER]
+    ph=ipaddress.ip_network(IP_PLACEHOLDER)
+    return [p for p in items if not ((n:=parse_net(p)) is not None and n.version==ph.version and n.subnet_of(ph))]
+
+def first_match(ctx, kind, host):
+    """按规则顺序，第一个覆盖 host 的规则集与条目：(规则集, 条目)；都不覆盖返回 (None, None)。"""
+    for s, items in ctx.payloads(kind):
+        for p in items:
+            if (domain_covered(host, [p]) if kind=="domain" else ip_covered(host, [p])): return s, p
+    return None, None
 
 # ---------------- 数据锁（watch 落盘与网页/命令的「读-改-写」互斥）----------------
 # pending.yaml / routed.yaml 都是整文件重写：watch 落盘和网页归类若交错，后写者会把前者的改动覆盖掉。
@@ -465,9 +544,9 @@ def _append_scanlog(ctx, text):
 
 # ---------------- 单行归类（scan 与 watch 共用）----------------
 def load_classified(ctx):
-    dom=[]; ip=[]
-    for fn in ctx.dom_files.values(): dom+=load_payload(os.path.join(ctx.ruleset,fn))
-    for fn in ctx.ip_files.values():  ip +=load_payload(os.path.join(ctx.ruleset,fn))
+    """全部规则集（收件箱与只读的 http 等）里的域名与 IP 条目：已被覆盖的主机不进待审与地域放行。"""
+    dom=[p for _, items in ctx.payloads("domain") for p in items]
+    ip =[p for _, items in ctx.payloads("ip") for p in items]
     return dom, ip
 
 def _bump(rec_map, key, ts, port):
@@ -630,8 +709,8 @@ def save_reviewed(ctx, hosts):
 def _learned(ctx, routed):
     """从现有规则集与地域放行清单学出打分用的统计：
     拉黑条目按站点归组；每个站点下「拉黑 / 放行 / 地域放行」各有多少主机；各词在拉黑、放行、地域放行中出现的次数。"""
-    rej=[_dom_base(p) for p in load_payload(os.path.join(ctx.ruleset, ctx.dom_files["reject"])) if p!=DOMAIN_PLACEHOLDER]
-    alw=[_dom_base(p) for c in ("proxy","direct") for p in load_payload(os.path.join(ctx.ruleset, ctx.dom_files[c])) if p!=DOMAIN_PLACEHOLDER]
+    rej=[_dom_base(p) for p in ctx.entries("domain", "reject")]
+    alw=[_dom_base(p) for c in ("proxy","direct") for p in ctx.entries("domain", c)]
     seen=[h for b in ("direct","proxy") for h in routed[b] if not is_ip(h)]
     rej_sites=collections.defaultdict(list)
     for b in rej: rej_sites[site_of(b)].append(b)
@@ -743,7 +822,7 @@ def direct_candidates(ctx, routed=None, top=None):
     import external
     routed=routed if routed is not None else load_routed(ctx.routed)
     keep=load_keepproxy(ctx)
-    proxied={site_of(_dom_base(p)) for p in load_payload(os.path.join(ctx.ruleset, ctx.dom_files["proxy"])) if p!=DOMAIN_PLACEHOLDER}
+    proxied={site_of(_dom_base(p)) for p in ctx.entries("domain", "proxy")}
     T=load_traffic(ctx)["hosts"]; out=[]
     for h, rec in routed["proxy"].items():
         if is_ip(h) or h in keep or set(_tokens(h)) & LOGIN_KW or site_of(h) in proxied: continue
@@ -1023,8 +1102,8 @@ def cmd_watch(ctx, args):
 # 次数是「新建连接」的次数，分不出定时连接、失败重试还是多个进程各自连接，所以另按小时分桶、按进程计数，
 # 看规律要看分桶，不能只看总数（2026-09-23：半小时 470 次 Datadog 实为评估时 216 个 claude -p 进程各连 2 次）。
 def rej_hit_re(ctx):
-    """匹配被两个拉黑规则集拒绝的连接日志：match RuleSet(<拉黑规则集名>) using REJECT。"""
-    names="|".join(re.escape(ctx.names[k]["reject"]) for k in ("domain", "ip"))
+    """匹配被拉黑规则集（收件箱与只读的都算）拒绝的连接日志：match RuleSet(<拉黑规则集名>) using REJECT。"""
+    names="|".join(re.escape(s["name"]) for s in ctx.sets if s["cat"]=="reject")
     return re.compile(r'match\s+RuleSet\((?:' + names + r')\)\s+using\s+REJECT', re.I)
 
 REJ_HOSTS_MAX  = 10     # 每条记下的不同主机数上限
@@ -1046,9 +1125,7 @@ def save_reject_hits(ctx, data):
     _atomic_write_text(reject_hits_path(ctx), json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True))
 
 def load_reject_payloads(ctx):
-    dom=[p for p in load_payload(os.path.join(ctx.ruleset, ctx.dom_files["reject"])) if p!=DOMAIN_PLACEHOLDER]
-    ip =[p for p in load_payload(os.path.join(ctx.ruleset, ctx.ip_files["reject"]))  if p!=IP_PLACEHOLDER]
-    return dom, ip
+    return ctx.entries("domain", "reject"), ctx.entries("ip", "reject")
 
 def reject_entry_for(host, rej_dom, rej_ip):
     """host 命中的最具体的拉黑条目；找不到（如规则集刚改、内核还在用旧副本）返回 None。"""
@@ -1286,9 +1363,10 @@ def cmd_routed(ctx, args):
 def _read_head(path):
     head=[]
     if os.path.exists(path):
-        for line in open(path,encoding="utf-8"):
-            if re.match(r'^\s*payload\s*:', line): break
-            head.append(line.rstrip("\n"))
+        with open(path,encoding="utf-8") as f:
+            for line in f:
+                if re.match(r'^\s*payload\s*:', line): break
+                head.append(line.rstrip("\n"))
     return head
 
 # ---- 占位条目（清单删空时回填，避免 mihomo 对空 payload 报错）----
@@ -1324,8 +1402,8 @@ def _write_payload(path, items, placeholder=None):
     _atomic_write_text(path, _payload_text(_read_head(path), items))
 
 # ---- 写入时的冗余与冲突检查 ----
-# 同一目标落在多类时，规则里排在前面的一类生效。实际顺序按 Clash 配置检测（ctx.order），
-# CAT_ORDER 是检测不全时的默认顺序，也是各处列出三类时的显示顺序。
+# 同一目标落在多个规则集时，规则里排在前面的生效。实际顺序按 Clash 配置检测（ctx.sets 的 rank，收件箱的先后即 ctx.order），
+# CAT_ORDER 是检测不全时收件箱的默认顺序，也是各处列出三类时的显示顺序。
 CAT_ORDER = ("reject", "direct", "proxy")
 CAT_CN    = {"reject": "拉黑", "direct": "直连", "proxy": "代理"}
 
@@ -1338,39 +1416,62 @@ def _dom_within(entry, base):
     b=_dom_base(entry)
     return b==base or b.endswith("."+base)
 
-def _winner(order, a, b):
-    return a if order.index(a) < order.index(b) else b
+def _lab(s):
+    """提示里怎么称呼一个规则集：收件箱沿用「代理类」，只读的另写出名字，如「代理类 common-proxy」。"""
+    return f"{CAT_CN[s['cat']]}类" if s["inbox"] else f"{CAT_CN[s['cat']]}类 {s['name']}"
+
+def _of(s):
+    return _lab(s) + ("的" if s["inbox"] else " 的")
+
+def _who(s):
+    """提示里「谁生效」：收件箱写「代理」，只读的写「common-proxy（代理）」。"""
+    return CAT_CN[s["cat"]] if s["inbox"] else f"{s['name']}（{CAT_CN[s['cat']]}）"
+
+def _inbox(ctx, kind, cat):
+    return next(s for s in ctx.sets if s["inbox"] and s["kind"]==kind and s["cat"]==cat)
+
+def _first_cover(ctx, kind, tok, covered):
+    """按规则顺序第一个覆盖 tok 的规则集与条目；covered(tok, [条目]) 为判断函数。"""
+    for s, items in ctx.payloads(kind):
+        hit=[p for p in items if covered(tok, [p])]
+        if hit: return s, hit[0]
+    return None, None
 
 def add_domains(ctx, cat, domains, notes=None):
-    """写入域名规则集。写入前：已被本类覆盖的跳过；本类中被新条目覆盖的旧条目一并移除；
-    与另外两类有重叠时在 notes 里说明哪一类生效（只提示，不改另外两类）。返回实际新增的条目。"""
+    """写入域名收件箱。写入前：已被本类收件箱覆盖、或按规则顺序已先命中本类的只读规则集（如 http 规则集）的跳过；
+    收件箱中被新条目覆盖的旧条目一并移除；与另外两类（全部规则集）有重叠时在 notes 里说明哪个生效（只提示，不改别的规则集）。
+    返回实际新增的条目。"""
     notes=[] if notes is None else notes
-    path=os.path.join(ctx.ruleset, ctx.dom_files[cat])
+    me=_inbox(ctx, "domain", cat); path=me["path"]
     payload=[p for p in load_payload(path) if p!=DOMAIN_PLACEHOLDER]; added=[]
-    others={c: [p for p in load_payload(os.path.join(ctx.ruleset, ctx.dom_files[c])) if p!=DOMAIN_PLACEHOLDER]
-            for c in CAT_ORDER if c!=cat}
+    others=[(s, items) for s, items in ctx.payloads("domain") if s["cat"]!=cat]
     for d in domains:
         b=_dom_base(d)
         if not b: continue
         if domain_covered(b, payload):
             notes.append(f"{b} 已被{CAT_CN[cat]}类现有条目覆盖，未写入"); continue
+        fs, fp = _first_cover(ctx, "domain", b, domain_covered)
+        if fs is not None and not fs["inbox"] and fs["cat"]==cat:
+            notes.append(f"{b} 已被{_of(fs)} {fp} 覆盖，未写入"); continue
         e=norm_domain(b)
         inner=[p for p in payload if _dom_within(p, b)]
         if inner:
             payload=[p for p in payload if p not in inner]
             notes.append(f"{e} 覆盖了{CAT_CN[cat]}类已有的 {', '.join(inner)}，已一并移除")
         payload.append(e); added.append(e)
-        for oc, op in others.items():
+        for os_, op in others:
             outer=[p for p in op if domain_covered(b, [p])]
             inner_o=[p for p in op if _dom_within(p, b) and p not in outer]
-            w=CAT_CN[_winner(ctx.order["domain"], oc, cat)]
-            if outer:   notes.append(f"重叠：{b} 也落在{CAT_CN[oc]}类的 {', '.join(outer)} 内，按规则顺序{w}生效")
-            if inner_o: notes.append(f"重叠：{CAT_CN[oc]}类的 {', '.join(inner_o)} 落在 {e} 内，这些子域按规则顺序{w}生效")
+            w=_who(os_ if os_["rank"]<me["rank"] else me)
+            if outer:   notes.append(f"重叠：{b} 也落在{_of(os_)} {', '.join(outer)} 内，按规则顺序{w}生效")
+            if inner_o: notes.append(f"重叠：{_of(os_)} {', '.join(inner_o)} 落在 {e} 内，这些子域按规则顺序{w}生效")
     _write_payload(path, payload, DOMAIN_PLACEHOLDER)
+    un=ctx.unreadable_note("domain")
+    if un: notes.append(un)
     return added
 
 def add_ips(ctx, cat, tokens, notes=None):
-    """写入 IP 规则集；单个 IP 若落在内置已知服务段内，自动扩成整段并提示。
+    """写入 IP 收件箱；单个 IP 若落在内置已知服务段内，自动扩成整段并提示。
     冗余与冲突检查同 add_domains。返回 (新增条目, notes)。"""
     notes=[] if notes is None else notes
     ph=ipaddress.ip_network(IP_PLACEHOLDER)
@@ -1380,9 +1481,9 @@ def add_ips(ctx, cat, tokens, notes=None):
             n=parse_net(c)
             if n is not None and not (n.version==ph.version and n.subnet_of(ph)): out.append(c)
         return out
-    path=os.path.join(ctx.ruleset, ctx.ip_files[cat])
+    me=_inbox(ctx, "ip", cat); path=me["path"]
     payload=real(load_payload(path)); added=[]
-    others={c: real(load_payload(os.path.join(ctx.ruleset, ctx.ip_files[c]))) for c in CAT_ORDER if c!=cat}
+    others=[(s, real(items)) for s, items in ctx.payloads("ip") if s["cat"]!=cat]
     for t in tokens:
         net=parse_net(t)
         if net is None: continue
@@ -1394,19 +1495,24 @@ def add_ips(ctx, cat, tokens, notes=None):
         wn=parse_net(write)
         if ip_covered(write, payload):
             notes.append(f"{write} 已被{CAT_CN[cat]}类现有网段覆盖，未写入"); continue
+        fs, fp = _first_cover(ctx, "ip", write, ip_covered)
+        if fs is not None and not fs["inbox"] and fs["cat"]==cat:
+            notes.append(f"{write} 已被{_of(fs)} {fp} 覆盖，未写入"); continue
         inner=[p for p in payload if parse_net(p).version==wn.version and parse_net(p).subnet_of(wn)]
         if inner:
             payload=[p for p in payload if p not in inner]
             notes.append(f"{write} 覆盖了{CAT_CN[cat]}类已有的 {', '.join(inner)}，已一并移除")
         payload.append(write); added.append(write)
-        for oc, op in others.items():
+        for os_, op in others:
             same=[p for p in op if parse_net(p).version==wn.version]
             outer=[p for p in same if wn.subnet_of(parse_net(p))]
             inner_o=[p for p in same if parse_net(p).subnet_of(wn) and p not in outer]
-            w=CAT_CN[_winner(ctx.order["ip"], oc, cat)]
-            if outer:   notes.append(f"重叠：{write} 也落在{CAT_CN[oc]}类的 {', '.join(outer)} 内，按规则顺序{w}生效")
-            if inner_o: notes.append(f"重叠：{CAT_CN[oc]}类的 {', '.join(inner_o)} 落在 {write} 内，按规则顺序{w}生效")
+            w=_who(os_ if os_["rank"]<me["rank"] else me)
+            if outer:   notes.append(f"重叠：{write} 也落在{_of(os_)} {', '.join(outer)} 内，按规则顺序{w}生效")
+            if inner_o: notes.append(f"重叠：{_of(os_)} {', '.join(inner_o)} 落在 {write} 内，按规则顺序{w}生效")
     _write_payload(path, payload, IP_PLACEHOLDER)
+    un=ctx.unreadable_note("ip")
+    if un: notes.append(un)
     return added, notes
 
 # ---------------- 规则集：读取 / 删除 / 改分类（供加回误拉黑与规则管理 UI 复用）----------------
@@ -1591,24 +1697,56 @@ def status_data(ctx):
     gen=os.path.join(ctx.cfg, "clash-verge.yaml")
     if os.path.exists(gen):
         d["generated"]=f"{datetime.datetime.fromtimestamp(os.path.getmtime(gen)):%Y-%m-%d %H:%M:%S}"
+    # 收件箱（本工具写入）：按类列出，比对条目数与修改时间，与旧版一致
     for kind, files in (("domain", ctx.dom_files), ("ip", ctx.ip_files)):
         for cat in CAT_ORDER:
             path=os.path.join(ctx.ruleset, files[cat]); name=ctx.names[kind][cat]
             n_file=len(load_payload(path))
             mt=datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S") if os.path.exists(path) else ""
-            s={"name":name, "kind":kind, "cat":cat, "count":n_file, "mtime":mt, "core_count":None, "core_mtime":"", "state":"unknown"}
+            s={"name":name, "kind":kind, "cat":cat, "count":n_file, "mtime":mt, "core_count":None, "core_mtime":"", "state":"unknown",
+               "inbox":True, "type":"file", "vehicle":""}
             if provs is not None:
                 p=provs.get(name)
                 if p is None:
                     s["state"]="missing"; bad.append(f"{name} 未被内核加载")
                 else:
                     s["core_mtime"]=str(p.get("updatedAt",""))[:19].replace("T", " "); s["core_count"]=p.get("ruleCount")
+                    s["vehicle"]=p.get("vehicleType") or ""
                     if s["core_mtime"]==mt and s["core_count"]==n_file: s["state"]="ok"
                     else: s["state"]="stale"; bad.append(f"{name} 改动未生效")
             d["sets"].append(s)
-    proxy=load_payload(os.path.join(ctx.ruleset, ctx.dom_files["proxy"]))
+    # 只读规则集（http 与收件箱之外的 file）：按规则顺序。http 的由内核按网址取，本工具读 path 处的本地缓存，
+    # 只比条目数（内核的 updatedAt 是取线上的时间，不是缓存文件的修改时间）；file 的同收件箱，改了要重新激活
+    for rs in ctx.sets:
+        if rs["inbox"]: continue
+        name=rs["name"]; path=rs["path"]
+        items, err = read_set(rs)
+        raw=len(load_payload(path)) if not err and rs["format"]=="yaml" else len(items)     # 与内核比对的条数含占位
+        mt=datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S") if path and os.path.exists(path) else ""
+        s={"name":name, "kind":rs["kind"], "cat":rs["cat"], "count":None if err else raw, "mtime":mt, "core_count":None,
+           "core_mtime":"", "state":"unknown", "inbox":False, "type":rs["type"], "vehicle":"", "path":path or "", "error":err or ""}
+        if err: s["state"]="unreadable"; bad.append(f"{name} {err}：「已有规则」的判断里缺了这一集")
+        if provs is not None:
+            p=provs.get(name)
+            if p is None:
+                s["state"]="missing"; bad.append(f"{name} 未被内核加载")
+            else:
+                s["core_mtime"]=str(p.get("updatedAt",""))[:19].replace("T", " "); s["core_count"]=p.get("ruleCount")
+                s["vehicle"]=p.get("vehicleType") or ""
+                if err: pass
+                elif rs["type"]=="http":
+                    if s["core_count"]==raw: s["state"]="ok"
+                    else:
+                        s["state"]="differ"
+                        bad.append(f"{name} 本地缓存 {raw} 条，内核 {s['core_count']} 条：缓存不是内核在用的那份，「已有规则」按缓存判断")
+                elif s["core_mtime"]==mt and s["core_count"]==raw: s["state"]="ok"
+                else: s["state"]="stale"; bad.append(f"{name} 改动未生效")
+        d["sets"].append(s)
+    # 回退域名：按规则顺序第一个覆盖它的规则集须是代理类（收件箱或只读的都行）
     for h, why in fallback_hosts().items():
-        ok=domain_covered(h, proxy); d["fallback"].append({"host":h, "why":why, "ok":ok})
+        fs, fp = first_match(ctx, "domain", h)
+        ok=fs is not None and fs["cat"]=="proxy"
+        d["fallback"].append({"host":h, "why":why, "ok":ok, "by":fs["name"] if fs else "", "by_cat":fs["cat"] if fs else ""})
         if not ok: bad.append(f"{h} 未放行")
     d["watch"]=_watch_running(ctx)
     if d["watch"] is False: bad.append("watch 未运行（计划任务 ClashVerge-LeakScan）")
@@ -1631,18 +1769,34 @@ def cmd_status(ctx, args):
     if d["generated"]: print(f"  Clash Verge 最近一次生成配置  {d['generated']}")
     print(f"  代理组 {d['proxy_group'] or '（未检测到）'}   兜底 MATCH,{d['match'] or '?'}")
 
-    print("\n【规则集：配置目录 vs 内核已加载】")
+    inbox=[s for s in d["sets"] if s["inbox"]]; ro=[s for s in d["sets"] if not s["inbox"]]
+    w=max([13]+[len(s["name"]) for s in d["sets"]])
+    print("\n【收件箱（本工具写入，type: file）：配置目录 vs 内核已加载】")
     if d["core"] is None: print("  （连不上内核，无法比对）")
     else:
-        for s in d["sets"]:
-            if s["state"]=="missing": print(f"  ✗ {s['name']:13} 内核未加载该规则集")
-            elif s["state"]=="ok":    print(f"  ✓ {s['name']:13} {s['count']:>4} 条  {s['mtime']}")
-            else: print(f"  ✗ {s['name']:13} 配置目录 {s['count']} 条 / {s['mtime']}，内核 {s['core_count']} 条 / {s['core_mtime']}")
+        for s in inbox:
+            if s["state"]=="missing": print(f"  ✗ {s['name']:{w}} 内核未加载该规则集")
+            elif s["state"]=="ok":    print(f"  ✓ {s['name']:{w}} {s['count']:>4} 条  {s['mtime']}")
+            else: print(f"  ✗ {s['name']:{w}} 配置目录 {s['count']} 条 / {s['mtime']}，内核 {s['core_count']} 条 / {s['core_mtime']}")
+
+    if ro:
+        print("\n【其它规则集（只读，一并算作已有规则；http 读本地缓存）：本地 vs 内核已加载】")
+        for s in ro:
+            tag=f"{s['type']:4} {CAT_CN[s['cat']]}{'IP' if s['kind']=='ip' else '域名'}"
+            core=f"内核 {s['vehicle'] or '?'} {s['core_count']} 条 / {'取于 ' if s['type']=='http' else ''}{s['core_mtime']}" \
+                 if s["core_count"] is not None else ("内核未加载" if s["state"]=="missing" else "（连不上内核）")
+            if s["state"]=="unreadable": print(f"  ✗ {s['name']:{w}} {tag}  {s['error']}；{core}")
+            elif s["state"]=="ok":       print(f"  ✓ {s['name']:{w}} {tag}  {s['count']:>4} 条  {core}")
+            elif s["state"]=="unknown":  print(f"  · {s['name']:{w}} {tag}  本地 {s['count']} 条  {core}")
+            else:                        print(f"  ✗ {s['name']:{w}} {tag}  本地 {s['count']} 条 / {s['mtime']}，{core}")
 
     print("\n【工具回退所需的代理放行】")
+    hw=max([14]+[len(f["host"]) for f in d["fallback"]])
     for f in d["fallback"]:
-        if f["ok"]: print(f"  ✓ {f['host']:14} {f['why']}")
-        else: print(f"  ✗ {f['host']:14} {f['why']}：不在 {ctx.names['domain']['proxy']}，经代理回退会落到 MATCH,REJECT")
+        if f["ok"]: print(f"  ✓ {f['host']:{hw}} {f['why']}（{f['by']}）")
+        elif f["by"]: print(f"  ✗ {f['host']:{hw}} {f['why']}：按规则顺序先命中 {f['by']}（{CAT_CN[f['by_cat']]}），经代理回退"
+                            + ("会被拒绝" if f["by_cat"]=="reject" else "不经节点、直接连"))
+        else: print(f"  ✗ {f['host']:{hw}} {f['why']}：不在任何代理规则集，经代理回退会落到 MATCH,{d['match'] or 'REJECT'}")
 
     print("\n【采集】")
     run=d["watch"]
@@ -1698,17 +1852,54 @@ def ruleset_audit(ctx):
         for par, hs in sorted(parents.items(), key=lambda x:-len(x[1])):
             if len(hs)>=MERGE_MIN and not any(_dom_base(x)==par for x in real):
                 rep["merge"].append((c, par, hs))
-    order=ctx.order["domain"]      # 前面的一类先命中
-    for i,a in enumerate(order):
-        for b in order[i+1:]:
-            for p in D[b]:
-                hit=[o for o in D[a] if o!=DOMAIN_PLACEHOLDER and domain_covered(_dom_base(p), [o])]
-                if hit: rep["overlap"].append(f"{CAT_CN[b]}类 {p} 落在{CAT_CN[a]}类 {', '.join(hit)} 内 → {CAT_CN[a]}生效，该条不起作用")
-            for p in D[a]:   # 先命中的一类里有更窄的条目：在后一类的大范围里挖出例外（范围相同的已在上面报过）
-                hit=[o for o in D[b] if o!=DOMAIN_PLACEHOLDER and _dom_base(o)!=_dom_base(p)
-                     and domain_covered(_dom_base(p), [o])]
-                if hit and p!=DOMAIN_PLACEHOLDER: rep["overlap"].append(f"{CAT_CN[a]}类 {p} 落在{CAT_CN[b]}类 {', '.join(hit)} 内 → 该子域{CAT_CN[a]}（例外）")
+    # 收件箱条目已被只读规则集（http 等）的同类条目覆盖：在前面的，收件箱这条本来就不起作用；在后面的，
+    # 两者之间没有别的类与它范围相交的条目时，删掉它仍落到同一类（典型：收件箱的条目已并入线上规则集）
+    _redundant_across(ctx, "domain", rep)
+    _redundant_across(ctx, "ip", rep)
+    sets=ctx.payloads("domain")     # 全部域名规则集，按规则顺序，前面的先命中
+    for i,(sa,A) in enumerate(sets):
+        for sb,B in sets[i+1:]:
+            if sa["cat"]==sb["cat"]: continue
+            for p in B:
+                hit=[o for o in A if domain_covered(_dom_base(p), [o])]
+                if hit: rep["overlap"].append(f"{_lab(sb)} {p} 落在{_lab(sa)} {', '.join(hit)} 内 → {_who(sa)}生效，该条不起作用")
+            for p in A:   # 先命中的里有更窄的条目：在后面的大范围里挖出例外（范围相同的已在上面报过）
+                hit=[o for o in B if _dom_base(o)!=_dom_base(p) and domain_covered(_dom_base(p), [o])]
+                if hit: rep["overlap"].append(f"{_lab(sa)} {p} 落在{_lab(sb)} {', '.join(hit)} 内 → 该子域{_who(sa)}（例外）")
     return rep
+
+def _scope_covers(kind, o, p):
+    """条目 o 匹配的范围是否包含条目 p 的全部范围。"""
+    if kind=="ip":
+        n, m = parse_net(p), parse_net(o)
+        return n is not None and m is not None and n.version==m.version and n.subnet_of(m)
+    if o.strip().startswith("+."): return _dom_within(p, _dom_base(o))
+    return not p.strip().startswith("+.") and _dom_base(p)==_dom_base(o)
+
+def _scope_meets(kind, a, b):
+    """两个条目匹配的范围是否相交。"""
+    if kind=="ip":
+        n, m = parse_net(a), parse_net(b)
+        return n is not None and m is not None and n.version==m.version and n.overlaps(m)
+    return domain_covered(_dom_base(a), [b]) or domain_covered(_dom_base(b), [a])
+
+def _redundant_across(ctx, kind, rep):
+    sets=ctx.payloads(kind)
+    known={(k, c, p) for k, c, p, _ in rep["redundant"]}
+    blind=[n for n in ctx.unreadable if any(s["name"]==n and s["kind"]==kind for s in ctx.sets)]
+    for s, items in sets:
+        if not s["inbox"]: continue
+        for p in items:
+            if (kind, s["cat"], p) in known: continue
+            for t, T in sets:
+                if t["inbox"] or t["cat"]!=s["cat"]: continue
+                o=next((o for o in T if _scope_covers(kind, o, p)), None)
+                if o is None: continue
+                if t["rank"]>s["rank"]:
+                    lo, hi = s["rank"], t["rank"]
+                    if blind and any(x["rank"] in range(lo+1, hi) for x in ctx.sets if x["name"] in blind): continue
+                    if any(_scope_meets(kind, p, q) for u, U in sets if lo<u["rank"]<hi and u["cat"]!=s["cat"] for q in U): continue
+                rep["redundant"].append((kind, s["cat"], p, f"{t['name']} 的 {o}")); break
 
 def cmd_tidy(ctx, args):
     rep=ruleset_audit(ctx)
@@ -1803,7 +1994,9 @@ def cmd_update_ipdata(ctx, args):
 # ---------------- main ----------------
 def main():
     parent=argparse.ArgumentParser(add_help=False)
-    parent.add_argument("--config-dir", dest="config_dir", help="Clash Verge 配置目录(含 profiles.yaml)；默认自动定位")
+    # 子命令前后都能写。默认值用 SUPPRESS：否则子命令的解析器会用它的默认值 None 盖掉写在子命令前面的值，
+    # 悄悄退回自动定位的配置目录（2026-09-25 因此把测试条目写进了真实的规则集）
+    parent.add_argument("--config-dir", dest="config_dir", default=argparse.SUPPRESS, help="Clash Verge 配置目录(含 profiles.yaml)；默认自动定位")
     ap=argparse.ArgumentParser(prog="clash_review", parents=[parent], description="Clash Verge 漏网审查工具（域名+IP，独立运行）")
     sub=ap.add_subparsers(dest="cmd")
     sc=sub.add_parser("scan", parents=[parent], help="增量扫描核心日志，更新待审清单(域名+IP)")
@@ -1839,7 +2032,7 @@ def main():
     ud=sub.add_parser("update-data", parents=[parent], help="(联网)update-ipdata + update-lists，月度任务用")
     ud.add_argument("--no-proxy", action="store_true")
     args=ap.parse_args()
-    cfg=resolve_config_dir(args.config_dir)
+    cfg=resolve_config_dir(getattr(args, "config_dir", None))
     if args.cmd not in ("update-ipdata", "update-lists", "update-data") and not os.path.isfile(os.path.join(cfg,"profiles.yaml")):
         print(f"未定位到 Clash Verge 配置目录(缺 profiles.yaml)。当前推断: {cfg}\n可用 --config-dir 指定。", file=sys.stderr); sys.exit(2)
     ctx=Ctx(cfg)
