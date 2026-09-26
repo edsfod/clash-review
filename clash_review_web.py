@@ -370,23 +370,41 @@ def api_todirect_test(ctx, body):
     jid = uuid.uuid4().hex[:12]
     job = {"total": len(items), "done": 0, "results": {}, "errors": {}, "running": True}
     _JOBS[jid] = job
-    def one(x):
+    # 两段流水线：测速与问模型分开两个线程池。原先同一个线程里「测速 → 问模型」串着做，模型一答几十秒，
+    # 占着 6 个测速线程，下一项的测速也开不了（2026-09-26：60 项跑了好几分钟）。
+    lock = threading.Lock()                                  # 两个线程池都会记结果
+    def finish(x, ev, a):
         h, rec, t, own = x
+        row = _direct_row(ctx, h, rec, t, own, ev, a, ph)
+        with lock: job["results"][h] = row; job["done"] += 1
+    def fail(x, e):
+        with lock: job["errors"][x[0]] = f"{type(e).__name__}: {e}"; job["done"] += 1
+    def ask(x, ev):
+        h, rec, _, _ = x
+        try:
+            a = layers.explain_item({"kind": "todirect", "host": h, "count": rec["count"]}, ctx, payloads, model=True)
+            _advice_save(ctx, "todirect", h, a)
+            finish(x, ev, a)
+        except Exception as e: fail(x, e)
+    def measure(x, models):
+        h, rec, _, _ = x
         try:
             ev = evidence.collect(h)
             if ev and isinstance(ev.get("cn_ips"), list) and ev["cn_ips"]:   # 解析不到的不用测速
                 ev = dict(ev, speed=evidence.collect_speed(h, cr.speed_scheme(rec["ports"]), proxy))
             a = _advice_load(ctx).get(f"todirect:{h}")
             if cr.direct_verdict(ev)[0] == "direct" and (not a or a.get("model_error") or _stale(a, ph)):
-                a = layers.explain_item({"kind": "todirect", "host": h, "count": rec["count"]}, ctx, payloads, model=True)
-                _advice_save(ctx, "todirect", h, a)
-            job["results"][h] = _direct_row(ctx, h, rec, t, own, ev, a, ph)
-        except Exception as e: job["errors"][h] = f"{type(e).__name__}: {e}"
-        job["done"] += 1
+                return models.submit(ask, x, ev)      # 测速过了、还没有有效结论的，交给问模型的线程池
+            finish(x, ev, a)
+        except Exception as e: fail(x, e)
     def run():
         import concurrent.futures as cf
-        with cf.ThreadPoolExecutor(6) as ex: list(ex.map(one, items))   # 测速要准，别开太多并发挤占带宽
-        job["running"] = False
+        try:
+            with cf.ThreadPoolExecutor(12) as models:        # 问模型只是等回话，不占带宽，多开几个
+                with cf.ThreadPoolExecutor(6) as speeds:     # 测速要准，别开太多并发挤占带宽
+                    list(speeds.map(lambda x: measure(x, models), items))
+        finally:
+            job["running"] = False
     threading.Thread(target=run, daemon=True).start()
     return {"job": jid, "total": len(items)}
 

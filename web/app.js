@@ -17,7 +17,9 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fmtN = (n) => Number(n).toLocaleString('en-US');
 const pct = (x) => `${Math.round(x * 100)}%`;
 // 规则集名与先后顺序取自 Clash 配置（/api/status 的 names、order），不写死
-const setName = (cat, kind = 'domain') => S.status?.names?.[kind]?.[cat] || `my-${cat}${kind === 'ip' ? '-ip' : ''}`;
+// 配了规则服务时写进的是服务端的规则集（status 的 dest.targets），否则是收件箱
+const setName = (cat, kind = 'domain') => S.status?.dest?.targets?.find((t) => t.cat === cat && t.kind === kind)?.id
+  || S.status?.names?.[kind]?.[cat] || `my-${cat}${kind === 'ip' ? '-ip' : ''}`;
 const catOrder = () => (S.status?.order || ['reject', 'direct', 'proxy']).map((c) => CAT_CN[c]).join(' → ');
 const fillNames = (html) => html.replace(/\{\{(reject|direct|proxy)\}\}/g, (_, c) => setName(c)).replace('{{order}}', catOrder());
 
