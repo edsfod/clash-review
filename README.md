@@ -322,6 +322,8 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 
 只读规则集的本地缓存不一定是内核在用的那份：Clash Verge 2.5.x 的服务模式下，内核的工作目录在 `C:\ProgramData\clash-verge-service\users\<哈希>\runtime\`（普通用户读不到），按网址取来的文件写在那里，配置目录 `path` 处的文件内核不再更新（2026-09-25 实测：内核重新取到 167 条，配置目录的缓存仍是 166 条）。`status` 按条目数比对，不一致就报出来，这时「已有规则」按旧缓存判断。要让它跟上，由分发规则的一方在更新线上文件时把同一份文件写到 `path` 处。
 
+只读规则集今后分「订阅」（只能在收件箱里覆盖）与「支配」（规则集是自己的，经服务端的写入接口直接改线上）两种，读取也改为按网址自己取、不再依赖 `path` 处的缓存。设计稿（未实现）：[`docs/rule-sources.md`](docs/rule-sources.md)。
+
 检测出的不对时，在 `settings.json` 里覆盖：`rulesets`（`{"domain": {"reject": 名字, …}, "ip": {…}}`，文件按 `<配置目录>/ruleset/<名字>.yaml`）、`proxy_group`。另有 `fallback_hosts`（别的工具经本机代理回退时要访问、`status` 要检查的域名）与 `deepseek_key_file`。
 
 ---
@@ -420,5 +422,6 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 
 ## 修订记录
 
+- 2026-09-26（未发版）：新增设计稿 `docs/rule-sources.md`：规则集分订阅与支配两种模式，支配模式的写入协议草案；第四节加指向它的一段。
 - 2026-09-25（v1.1.0）：「已有规则」改为看 Clash 配置里全部 `domain` / `ipcidr` 规则集（`type: file` 与 `type: http`，按 `rules` 顺序），`http` 的读 `path` 处的本地缓存，读不到的跳过并报出；写入仍只写收件箱（每类第一个 `type: file`）。涉及：漏网是否已覆盖、写入前的冗余与重叠提示、`tidy`（收件箱条目已并入 http 规则集时列为可清理；跨类重叠写出规则集名）、`rejects`（http 拉黑规则集的命中也计入）、回退域名检查（按规则顺序先命中的须是代理类）、网页的同站条目。`status` 分列收件箱与其它规则集（内核的 `vehicleType`、`ruleCount`，本地缓存条数）。只有收件箱时行为不变：旧版与新版在同一份配置上跑 `tidy`、`promote`、`tidy --apply`、`list`、`rejects`，输出与写出的文件逐字相同。另修：`--config-dir` 写在子命令前面时被忽略、退回自动定位的配置目录；读规则集与清单后未及时关闭文件。加 `tests/`（`python -m unittest discover -s tests`）。
 - 2026-09-24（v1.0.0）：首次公开发布。此前在作者的私有工作区里开发，历史不随公开仓库发布。
