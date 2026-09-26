@@ -34,7 +34,7 @@ clash_review —— Clash Verge (mihomo) 漏网审查工具（独立可运行，
 scan.log / ipdata/，以及 my-*.yaml / my-*-ip.yaml。幂等可反复运行。归类后需在 Clash Verge【右键→重新激活】生效。
 """
 import os, sys, re, glob, gzip, bisect, argparse, datetime, ipaddress, tempfile, json, hashlib, time, collections, threading, math
-import urllib.request, urllib.parse
+import urllib.request, urllib.parse, urllib.error
 
 # ---------------- 设置与运行数据放在哪（web-kit 的 tooldirs）----------------
 # 设置（settings.json、no_send.txt）在 %APPDATA%\clash-review\，运行数据在 %LOCALAPPDATA%\clash-review\；
@@ -131,7 +131,7 @@ def detect_layout(cfg):
         cat="reject" if target.upper() in ("REJECT", "REJECT-DROP") else "direct" if target.upper()=="DIRECT" else "proxy"
         path=p.get("path") or None
         if path and not os.path.isabs(path): path=os.path.normpath(os.path.join(cfg, path))
-        out["all"].append({"name":name, "kind":kind, "cat":cat, "type":typ, "path":path,
+        out["all"].append({"name":name, "kind":kind, "cat":cat, "type":typ, "path":path, "url":p.get("url") or "",
                            "format":(p.get("format") or "yaml").lower(), "rank":rank})
         if typ!="file" or not path or cat in out["sets"][kind]: continue
         out["sets"][kind][cat]={"name":name, "path":path}
@@ -411,6 +411,8 @@ class Ctx:
         self.proxy_group=st.get("proxy_group") or lay["proxy_group"]
         # 全部规则集（收件箱 + 只读的 http / 其它 file 规则集），按规则顺序
         self.sets=self._all_sets(lay); self.unreadable={}
+        # 目的地：settings.json 有 destination 时，归类决定写进规则服务（见下文「目的地」一节），否则写收件箱
+        self.dest=Destination(st["destination"], self) if st.get("destination") else None
         global LOCAL_PROXY, PIPE_HINT
         LOCAL_PROXY=f"http://127.0.0.1:{lay['mixed_port']}" if lay["mixed_port"] else None
         PIPE_HINT=lay["pipe"]
@@ -442,7 +444,8 @@ class Ctx:
         """[(规则集, 条目)]，按规则顺序，占位已去掉。只读规则集读不到的记进 self.unreadable（名字 → 原因）并跳过。"""
         out=[]
         for s in self.sets_of(kind, cat):
-            items, err = read_set(s)
+            got=self.dest.items_for(s) if self.dest else None     # 规则服务的规则集：用写入接口取来的条目
+            items, err = got if got is not None else read_set(s)
             if err and not s["inbox"]: self.unreadable[s["name"]]=err; continue
             self.unreadable.pop(s["name"], None)      # 网页与 watch 常驻：缓存后来有了就不再提示
             out.append((s, items))
@@ -488,8 +491,8 @@ def first_match(ctx, kind, host):
 # ---------------- 数据锁（watch 落盘与网页/命令的「读-改-写」互斥）----------------
 # pending.yaml / routed.yaml 都是整文件重写：watch 落盘和网页归类若交错，后写者会把前者的改动覆盖掉。
 class data_lock:
-    def __init__(self, ctx, timeout=10.0):
-        self.path=os.path.join(ctx.review, "data.lock"); self.timeout=timeout; self.f=None
+    def __init__(self, ctx, timeout=10.0, name="data.lock"):
+        self.path=os.path.join(ctx.review, name); self.timeout=timeout; self.f=None
     def __enter__(self):
         try:
             import msvcrt
@@ -508,6 +511,186 @@ class data_lock:
             import msvcrt
             try: self.f.seek(0); msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
             finally: self.f.close()
+
+# ---------------- 目的地：规则服务（写入接口）----------------
+# 归类决定默认写本机文件（收件箱）。settings.json 里有 destination 时，改为经写入接口直接写进规则服务的线上正本
+# （协议见 docs/destinations.md 第三节）：
+#   {"endpoint": "https://…/api/v1", "key_file": "写入密钥文件", "admin_url": "管理页（可选，规则页给链接）",
+#    "rulesets": {"domain": {"reject": "<id>", "direct": "<id>", "proxy": "<id>"}, "ip": {…}}}
+# 写入前的检查（冗余、重叠、写法）由服务端做，提示原样显示。服务端的条目经 GET /rulesets?entries=1 取来，缓存在
+# var/destination.json，作为 Clash 里对应 http 规则集（网址以服务端给的 path 结尾）的「已有规则」。
+# 已提交的决定也记在那里；上线后（GET /deployments/<提交>）让内核立即重新取对应的规则集，不用等它的更新间隔。
+DEST_TTL = 600          # 秒：服务端条目的缓存多久重取一次（watch 每次落盘都读）
+DEST_GIVE_UP = 1800     # 秒：提交后这么久仍未上线，不再等
+DEST_KEEP = 86400       # 秒：已结束的提交记录保留多久（status 里看得到）
+DEST_DIRECT_TIMEOUT = 8 # 秒：第一次试直连的超时；连不上改经本机代理，并记住
+
+class DestError(Exception):
+    """写到规则服务失败。消息给人看；待审里的条目不动。"""
+
+class Destination:
+    def __init__(self, conf, ctx):
+        if not isinstance(conf, dict) or not conf.get("endpoint"):
+            raise SystemExit("settings.json 的 destination 要写 endpoint（规则服务的写入接口地址）")
+        self.ctx=ctx; self.endpoint=conf["endpoint"].rstrip("/"); self.key_file=conf.get("key_file") or ""
+        self.rulesets=conf.get("rulesets") or {}; self.admin_url=conf.get("admin_url") or ""
+        self.path=os.path.join(ctx.review, "destination.json")
+        self.retry_at=0.0; self.last_error=""
+
+    # -- 状态文件：{"route", "snapshot": {time, head, expires, sets: [{id, path, version, behavior, entries}]}, "submitted": [...]} --
+    def load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f: d=json.load(f)
+        except (OSError, ValueError): d={}
+        d.setdefault("route", None); d.setdefault("snapshot", None); d.setdefault("submitted", [])
+        return d
+
+    def update(self, fn):
+        with data_lock(self.ctx, name="destination.lock"):
+            d=self.load(); fn(d); _atomic_write_text(self.path, json.dumps(d, ensure_ascii=False, indent=1))
+
+    def key(self):
+        p=os.path.expandvars(os.path.expanduser(self.key_file)) if self.key_file else ""
+        if not p: raise DestError("settings.json 的 destination 没写 key_file（写入密钥文件）")
+        try:
+            with open(p, encoding="utf-8") as f: k=f.read().strip()
+        except OSError as e: raise DestError(f"写入密钥文件读不了：{e}")
+        if not k: raise DestError(f"写入密钥文件是空的：{p}")
+        return k
+
+    def call(self, method, path, body=None, timeout=30):
+        """(状态码, 响应头, JSON 或 None)。先用上次能用的线路；没有就先直连、再经本机代理，记住能用的那条。"""
+        data=json.dumps(body).encode() if body is not None else None
+        hdr={"Authorization": f"Bearer {self.key()}", "User-Agent": "clash-review", "Accept": "application/json"}
+        if data is not None: hdr["Content-Type"]="application/json"
+        known=self.load()["route"]
+        routes=[known] + [r for r in ("direct", "proxy") if r!=known] if known else ["direct", "proxy"]
+        errs=[]
+        for r in routes:
+            px={} if r=="direct" else {"http": local_proxy(), "https": local_proxy()}
+            opener=urllib.request.build_opener(urllib.request.ProxyHandler(px))
+            req=urllib.request.Request(self.endpoint+path, data=data, method=method, headers=hdr)
+            t=timeout if (r==known or r=="proxy") else DEST_DIRECT_TIMEOUT
+            try:
+                with opener.open(req, timeout=t) as res: status, headers, raw = res.status, res.headers, res.read()
+            except urllib.error.HTTPError as e:
+                status, headers, raw = e.code, e.headers, e.read()
+            except OSError as e:          # URLError、超时、连接被拒都是 OSError
+                errs.append(f"{'直连' if r=='direct' else '经代理'}：{getattr(e, 'reason', e)}"); continue
+            if r!=known: self.update(lambda d: d.update(route=r))
+            try: js=json.loads(raw.decode("utf-8")) if raw else None
+            except ValueError: js=None
+            return status, headers, js
+        raise DestError("连不上规则服务（" + "；".join(errs) + "）")
+
+    def target(self, kind, cat):
+        rid=(self.rulesets.get(kind) or {}).get(cat)
+        if not rid:
+            raise DestError(f"settings.json 的 destination.rulesets 没有指定{CAT_CN[cat]}{'IP' if kind=='ip' else '域名'}写进哪个规则集")
+        return rid
+
+    def snapshot(self, max_age=DEST_TTL):
+        """服务端全部规则集（带条目）。缓存没过期就用缓存；取不到时用旧缓存（没有就是 None），旧缓存里记下原因。"""
+        snap=self.load()["snapshot"]
+        if snap and time.time()-snap.get("time", 0) < max_age: return snap
+        if max_age and time.time()<self.retry_at: return snap and dict(snap, stale=self.last_error)
+        try:
+            status, headers, js = self.call("GET", "/rulesets?entries=1")
+            if status!=200 or not isinstance(js, list):
+                raise DestError(f"读取规则集失败（HTTP {status}）：{(js or {}).get('detail', '') if isinstance(js, dict) else ''}")
+        except DestError as e:
+            # 取不到时两分钟内不再试：payloads 调用很频繁，断网时每次都等超时，网页和 watch 会被拖住
+            self.retry_at=time.time()+120; self.last_error=str(e)
+            return snap and dict(snap, stale=str(e))
+        snap={"time": time.time(), "head": headers.get("x-head", ""), "expires": headers.get("x-credential-expires", ""),
+              "sets": [{k: s.get(k) for k in ("id", "path", "version", "behavior", "entries")} for s in js]}
+        self.update(lambda d: d.update(snapshot=snap))
+        return snap
+
+    @staticmethod
+    def match(url, snap):
+        """Clash 里一个 http 规则集的网址对应服务端的哪个规则集：网址（去掉查询串）以 /<path> 结尾。"""
+        if not url or not snap: return None
+        u=url.split("#")[0].split("?")[0]
+        return next((x for x in snap["sets"] if x.get("path") and u.endswith("/"+x["path"])), None)
+
+    def items_for(self, s):
+        """Ctx.payloads 用：这个规则集若属于规则服务，返回 (条目, None)；不属于返回 None，照旧读本地。"""
+        if s.get("type")!="http" or not s.get("url"): return None
+        m=self.match(s["url"], self.snapshot())
+        return None if m is None else (strip_placeholder(list(m.get("entries") or []), s["kind"]), None)
+
+    def write(self, adds):
+        """adds: [(kind, cat, 条目)]，一批提交（只加，不带 base：只加不改，不怕别处的改动）。
+        返回 (提交号或 None, {(kind, cat): 真正新增的条目}, 服务端提示)。失败抛 DestError。"""
+        ops=[{"op": "add", "ruleset": self.target(k, c), "entry": e} for k, c, e in adds]
+        if not ops: return None, {}, []
+        status, _, js = self.call("POST", "/changes", {"ops": ops})
+        js=js if isinstance(js, dict) else {}
+        if status==401: raise DestError("规则服务说写入密钥不对")
+        if status==422: raise DestError("规则服务拒绝了这批改动：" + "；".join(js.get("errors") or [js.get("detail", "")]))
+        if status==409: raise DestError("规则服务上的规则在提交时被别处改动了，请再试一次")
+        if status not in (200, 202): raise DestError(f"写入失败（HTTP {status}）：{js.get('detail', '')}")
+        done={}
+        for (k, c, e), r in zip(adds, js.get("results") or []):
+            if r.get("result")=="done": done.setdefault((k, c), []).append(e)
+        commit=js.get("commit")
+        rec={"commit": commit, "time": time.time(), "rulesets": sorted({o["ruleset"] for o in ops}),
+             "entries": [e for _, _, e in adds], "state": "pending"}
+        self.update(lambda d: d.update(snapshot=None, submitted=d["submitted"] + ([rec] if commit else [])))
+        self.snapshot(0)          # 立即重取：刚写的条目马上算作「已有规则」，watch 不会把它们放回待审
+        return commit, done, list(js.get("notes") or [])
+
+    def pending(self):
+        return [r for r in self.load()["submitted"] if r["state"]=="pending"]
+
+    def settle(self):
+        """查已提交的决定上线没有；上线的让内核立即重新取对应的规则集。返回这次状态有变化的记录。"""
+        now=time.time(); changed=[]
+        for rec in self.pending():
+            rec=dict(rec)
+            if now-rec["time"]>DEST_GIVE_UP: rec["state"]="timeout"; changed.append(rec); continue
+            try: status, _, js = self.call("GET", f"/deployments/{rec['commit']}")
+            except DestError: continue
+            st=(js or {}).get("state") if isinstance(js, dict) else None
+            if status!=200 or st not in ("live", "failed"): continue
+            rec["state"]=st; rec["run"]=js.get("run", "")
+            if st=="live": rec["kernel"]=self.refresh_kernel(rec["rulesets"])
+            changed.append(rec)
+        if changed:
+            by={r["commit"]: r for r in changed}
+            def apply(d):
+                merged=[by.get(r["commit"], r) for r in d["submitted"]]
+                d["submitted"]=[r for r in merged if r["state"]=="pending" or now-r["time"]<DEST_KEEP]
+            self.update(apply)
+        return changed
+
+    def refresh_kernel(self, ids):
+        """让内核重新取 Clash 配置里对应这些规则集的 http 规则集，再核对条目数。返回一句说明。"""
+        snap=self.snapshot(0)
+        pairs=[(s["name"], m) for s in self.ctx.sets
+               if s["type"]=="http" and (m:=self.match(s.get("url"), snap)) is not None and m["id"] in ids]
+        if not pairs: return "Clash 配置里没有对应的规则集，内核会按自己的间隔取到"
+        try:
+            for name, _ in pairs:
+                code=pipe_request("PUT", f"/providers/rules/{urllib.parse.quote(name)}")
+                if code not in (200, 204): return f"让内核重新取 {name} 失败：HTTP {code}"
+            provs=pipe_get("/providers/rules").get("providers", {})
+        except Exception as e:
+            return f"没能让内核重新取（{e}）；内核会按自己的间隔取到"
+        diff=[f"{n} 内核 {provs.get(n, {}).get('ruleCount')} 条、服务端 {max(1, len(m.get('entries') or []))} 条"
+              for n, m in pairs if provs.get(n, {}).get("ruleCount")!=max(1, len(m.get("entries") or []))]
+        return ("内核已重新取，但条目数不符：" + "；".join(diff)) if diff else f"内核已重新取 {len(pairs)} 个规则集，条目数一致"
+
+def dest_settler(ctx, stop, every=15):
+    """常驻进程（watch、网页）里的后台线程：有已提交未上线的决定时，每隔一会儿查一次。"""
+    while not stop.wait(every):
+        try:
+            if ctx.dest and ctx.dest.pending():
+                for r in ctx.dest.settle():
+                    _append_scanlog(ctx, f"destination {r['commit'][:7]} {r['state']}" + (f": {r.get('kernel')}" if r.get("kernel") else ""))
+        except Exception as e:
+            _append_scanlog(ctx, f"destination settle error: {type(e).__name__}: {e}")
 
 # ---------------- 增量状态（var/scan_state.json，仅 scan 读文件时用）----------------
 # 核心日志文件每行以 "[YYYY-MM-DD HH:MM:SS.mmm]" 开头。以已处理的最大行首时间戳为高水位，
@@ -912,6 +1095,21 @@ def no_pipe_message():
     return (f"找不到内核管道：{want}，也没有 \\\\.\\pipe\\{PIPE_PREFIX}*。"
             "Clash Verge 没在运行，或不是 2.5.x（本工具按 2.5.4 的布局写：内核经命名管道提供控制接口）。")
 
+def pipe_request(method, path):
+    """经内核命名管道发一次没有请求体的请求（如 PUT /providers/rules/<名字>），返回状态码。
+    用 HTTP/1.0：响应不分块、读到连接关闭为止。"""
+    pipes=find_core_pipes()
+    if not pipes: raise RuntimeError(no_pipe_message())
+    with open(pipes[0], "r+b", buffering=0) as f:
+        f.write(f"{method} {path} HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".encode())
+        data=b""
+        while True:
+            c=f.read(65536)
+            if not c: break
+            data+=c
+    parts=data.split(b"\r\n", 1)[0].split(b" ")
+    return int(parts[1]) if len(parts)>1 and parts[1].isdigit() else 0
+
 def pipe_get(path):
     """经内核命名管道发一次 GET，返回解析后的 JSON。找不到管道或请求失败时抛异常。"""
     pipes=find_core_pipes()
@@ -1044,6 +1242,7 @@ def cmd_watch(ctx, args):
     cls=list(load_classified(ctx)); rej=list(load_reject_payloads(ctx)); rej_rx=rej_hit_re(ctx)
     sampler=TrafficSampler(); threading.Thread(target=sampler.run, daemon=True).start()
     threading.Thread(target=link_probe, args=(ctx, threading.Event()), daemon=True).start()
+    if ctx.dest: threading.Thread(target=dest_settler, args=(ctx, threading.Event()), daemon=True).start()
     tracker=ContextTracker()
     def flush(reason):
         if not st["lines"]: return
@@ -1437,11 +1636,39 @@ def _first_cover(ctx, kind, tok, covered):
         if hit: return s, hit[0]
     return None, None
 
+def _dest_form(kind, tok, notes):
+    """写进规则服务的条目写法，与写收件箱时相同：域名一律 +.，单个 IP 写成 /32（落在已知服务段内的扩成整段）。无效返回 None。"""
+    if kind=="domain":
+        b=_dom_base(tok)
+        return norm_domain(b) if b else None
+    net=parse_net(tok)
+    if net is None: return None
+    write=str(net)
+    if net.prefixlen==net.max_prefixlen:
+        svc, bnet = builtin_service(str(net.network_address))
+        if svc and bnet is not None:
+            write=str(bnet); notes.append(f"{tok.strip()} 识别为 {svc}，按整段 {write} 写入")
+    return write
+
+def dest_add(ctx, items, notes):
+    """items: [(kind, cat, 原始写法)]，一批写进规则服务。返回 {(kind, cat): 真正新增的条目}；提交号与服务端的提示追加到 notes。
+    写入前的检查由服务端做。失败抛 DestError。"""
+    adds=[]
+    for k, c, t in items:
+        e=_dest_form(k, t, notes)
+        if e and (k, c, e) not in adds: adds.append((k, c, e))
+    commit, done, server_notes = ctx.dest.write(adds)
+    notes+=server_notes
+    if commit: notes.append(f"已提交到规则服务（{commit[:7]}），上线后自动让 Clash 重新取，一般一两分钟")
+    elif adds: notes.append("规则服务上已经有这些条目，没有改动")
+    return done
+
 def add_domains(ctx, cat, domains, notes=None):
     """写入域名收件箱。写入前：已被本类收件箱覆盖、或按规则顺序已先命中本类的只读规则集（如 http 规则集）的跳过；
     收件箱中被新条目覆盖的旧条目一并移除；与另外两类（全部规则集）有重叠时在 notes 里说明哪个生效（只提示，不改别的规则集）。
-    返回实际新增的条目。"""
+    配了规则服务（ctx.dest）时改为写进规则服务，检查由服务端做。返回实际新增的条目。"""
     notes=[] if notes is None else notes
+    if ctx.dest: return dest_add(ctx, [("domain", cat, d) for d in domains], notes).get(("domain", cat), [])
     me=_inbox(ctx, "domain", cat); path=me["path"]
     payload=[p for p in load_payload(path) if p!=DOMAIN_PLACEHOLDER]; added=[]
     others=[(s, items) for s, items in ctx.payloads("domain") if s["cat"]!=cat]
@@ -1472,8 +1699,9 @@ def add_domains(ctx, cat, domains, notes=None):
 
 def add_ips(ctx, cat, tokens, notes=None):
     """写入 IP 收件箱；单个 IP 若落在内置已知服务段内，自动扩成整段并提示。
-    冗余与冲突检查同 add_domains。返回 (新增条目, notes)。"""
+    冗余与冲突检查同 add_domains；配了规则服务时同样改写到那里。返回 (新增条目, notes)。"""
     notes=[] if notes is None else notes
+    if ctx.dest: return dest_add(ctx, [("ip", cat, t) for t in tokens], notes).get(("ip", cat), []), notes
     ph=ipaddress.ip_network(IP_PLACEHOLDER)
     def real(items):
         out=[]
@@ -1552,36 +1780,49 @@ def move_entry(ctx, kind, src_cat, dst_cat, entry, notes=None):
 def routed_classify(ctx, cat, hosts):
     """把地域放行里的主机归入 cat 类，并从地域放行清单移除（避免重复出现）。返回 (新增条目, notes)。"""
     added=[]; notes=[]
+    # 先写规则（规则服务要联网，放在数据锁外面），写成功了再从清单移除
+    if ctx.dest:
+        done=dest_add(ctx, [("ip" if is_ip(h) else "domain", cat, h) for h in hosts], notes)
+        added=[e for es in done.values() for e in es]
+    else:
+        for h in hosts: added+=move_entry(ctx, "ip" if is_ip(h) else "domain", None, cat, h, notes)
     with data_lock(ctx):
         routed=load_routed(ctx.routed)
-        for h in hosts:
-            added+=move_entry(ctx, "ip" if is_ip(h) else "domain", None, cat, h, notes)
-            routed["direct"].pop(h, None); routed["proxy"].pop(h, None)
+        for h in hosts: routed["direct"].pop(h, None); routed["proxy"].pop(h, None)
         save_routed(ctx.routed, routed)
     return added, notes
 
 def promote(ctx, targets):
     """归类并从待审清单移除。targets: {cat: [域名或 IP/CIDR, ...]}。
     返回 [(cat, kind, 新增条目列表, notes)] 与从待审移除的主机列表。命令行与网页共用。"""
-    out=[]; moved=[]
+    groups=[]
+    for cat in CAT_ORDER:
+        toks=[x.strip() for x in targets.get(cat, []) if x.strip()]
+        dom_toks=[t for t in toks if not is_ip_token(t)]; ip_toks=[t for t in toks if is_ip_token(t)]
+        if dom_toks: groups.append((cat, "domain", dom_toks))
+        if ip_toks:  groups.append((cat, "ip", ip_toks))
+    # 先写规则，再动待审：写入失败（规则服务连不上等）时抛异常，待审不变。
+    # 写规则服务要联网，放在数据锁外面，免得 watch 落盘时等锁超时。
+    out=[]
+    if ctx.dest and groups:
+        notes=[]; done=dest_add(ctx, [(k, c, t) for c, k, ts in groups for t in ts], notes)
+        out=[(c, k, done.get((k, c), []), notes if i==0 else []) for i, (c, k, _) in enumerate(groups)]
+    else:
+        for c, k, ts in groups:
+            if k=="domain": notes=[]; added=add_domains(ctx, c, ts, notes)
+            else: added, notes=add_ips(ctx, c, ts)
+            out.append((c, k, added, notes))
+    moved=[]
     with data_lock(ctx):
         pending=load_pending(ctx.pending)
-        for cat in CAT_ORDER:
-            toks=[x.strip() for x in targets.get(cat, []) if x.strip()]
-            if not toks: continue
-            ip_toks =[t for t in toks if is_ip_token(t)]
-            dom_toks=[t for t in toks if not is_ip_token(t)]
-            if dom_toks:
-                notes=[]; added=add_domains(ctx, cat, dom_toks, notes)
-                out.append((cat, "domain", added, notes))
-                for d in dom_toks:
+        for c, k, ts in groups:
+            if k=="domain":
+                for d in ts:
                     key=d.lstrip("+.")
                     for pk in list(pending["domains"]):
                         if pk==key or pk.endswith("."+key) or pk==d: pending["domains"].pop(pk,None); moved.append(pk)
-            if ip_toks:
-                added, notes=add_ips(ctx, cat, ip_toks)
-                out.append((cat, "ip", added, notes))
-                for t in ip_toks:
+            else:
+                for t in ts:
                     net=parse_net(t)
                     for pk in list(pending["ips"]):
                         if net is not None and parse_net(pk) is not None and parse_net(pk).subnet_of(net):
@@ -1607,13 +1848,16 @@ def cmd_ignore(ctx, args):
 
 def cmd_promote(ctx, args):
     targets={cat: getattr(args,cat).split(",") for cat in CAT_ORDER if getattr(args,cat)}
-    out, moved=promote(ctx, targets)
+    try: out, moved=promote(ctx, targets)
+    except DestError as e:
+        print(f"没有写入，待审不变：{e}", file=sys.stderr); sys.exit(1)
     for cat, kind, added, notes in out:
         for n in notes: print("  ·", n)
         k="域名" if kind=="domain" else "IP"
         print(f"[{cat}/{k}] 写入{len(added)}条: {added}" if added else f"[{cat}/{k}] 无新增(已覆盖)")
     if moved: print(f"已从待审移除: {moved}")
-    print("⚠ 归类后请在 Clash Verge 对相应配置【右键→重新激活】(或点🔥)生效。")
+    if ctx.dest: print("写进了规则服务：上线后常驻的 watch（或打开的网页）会让 Clash 重新取，不用重新激活。")
+    else: print("⚠ 归类后请在 Clash Verge 对相应配置【右键→重新激活】(或点🔥)生效。")
 
 # ---------------- status：配置目录与内核实际加载是否一致 ----------------
 # 内核读的是 C:\ProgramData\clash-verge-service\users\<hash>\runtime\ruleset\ 下的副本，Clash Verge
@@ -1684,7 +1928,8 @@ def status_data(ctx):
        "match":ctx.layout["match"], "guessed":ctx.guessed, "order":list(ctx.order["domain"])}
     bad=d["bad"]; provs=None
     if not ctx.layout["found"]: bad.append("配置目录里没有 clash-verge.yaml，规则集名与代理组读不到（先在 Clash Verge 里激活一次配置）")
-    if ctx.guessed: bad.append("规则里找不到这些规则集，按默认名猜的：" + "、".join(ctx.guessed) + "（在 settings.json 的 rulesets 里指定）")
+    if ctx.guessed and not ctx.dest: bad.append("规则里找不到这些规则集，按默认名猜的：" + "、".join(ctx.guessed) + "（在 settings.json 的 rulesets 里指定）")
+    d["dest"]=dest_status(ctx, bad) if ctx.dest else None
     if ctx.layout["found"] and (ctx.layout["match"] or "").upper()!="REJECT":
         bad.append(f"规则最后一条是 MATCH,{ctx.layout['match']}，不是 MATCH,REJECT：没有「漏网」，待审清单不会有东西")
     try:
@@ -1757,6 +2002,44 @@ def status_data(ctx):
     d["decisions"]=decisions_status(ctx)
     return d
 
+def dest_status(ctx, bad):
+    """规则服务目的地的现状：连得上没有、密钥对不对、每类写进哪个规则集、Clash 里对不对得上、已提交的上线没有。"""
+    dest=ctx.dest
+    try: dest.settle()
+    except Exception: pass
+    out={"endpoint": dest.endpoint, "admin_url": dest.admin_url, "ok": False, "error": "", "head": "", "expires": "",
+         "targets": [], "submitted": dest.load()["submitted"]}
+    try:
+        status, headers, js = dest.call("GET", "/rulesets")
+        if status==200 and isinstance(js, list):
+            out.update(ok=True, head=headers.get("x-head", ""), expires=headers.get("x-credential-expires", ""))
+        elif status==401: out["error"]="写入密钥不对"
+        else: out["error"]=f"HTTP {status}：{(js or {}).get('detail', '') if isinstance(js, dict) else ''}"
+    except DestError as e:
+        out["error"]=str(e); js=None
+    if not out["ok"]: bad.append(f"规则服务：{out['error']}（归类写不进去）")
+    ids={s["id"]: s for s in js} if out["ok"] else {}
+    snap=dest.snapshot()
+    for kind in ("domain", "ip"):
+        for cat in CAT_ORDER:
+            rid=(dest.rulesets.get(kind) or {}).get(cat)
+            prov=next((s["name"] for s in ctx.sets if s["type"]=="http" and (m:=Destination.match(s.get("url"), snap)) and m["id"]==rid), "") if rid else ""
+            t={"kind": kind, "cat": cat, "id": rid or "", "exists": bool(rid and rid in ids), "provider": prov}
+            out["targets"].append(t)
+            what=f"{CAT_CN[cat]}{'IP' if kind=='ip' else '域名'}"
+            if not rid: bad.append(f"规则服务：没有指定{what}写进哪个规则集（settings.json 的 destination.rulesets）")
+            elif out["ok"] and not t["exists"]: bad.append(f"规则服务上没有规则集 {rid}（{what}）")
+            elif snap and not prov: bad.append(f"Clash 配置里没有对应 {rid} 的规则集：写进去后这台电脑用不上")
+    if out["expires"]:
+        try:
+            left=(datetime.datetime.strptime(out["expires"][:19], "%Y-%m-%d %H:%M:%S")-datetime.datetime.now()).days
+            if left<30: bad.append(f"规则服务的 GitHub 令牌 {left} 天后到期")
+        except ValueError: pass
+    for r in out["submitted"]:
+        if r["state"] in ("failed", "timeout"):
+            bad.append(f"规则服务：提交 {r['commit'][:7]} {'部署失败' if r['state']=='failed' else '超过半小时仍未上线'}（{', '.join(r['entries'][:3])}）")
+    return out
+
 def cmd_status(ctx, args):
     d=status_data(ctx); bad=d["bad"]
     print("【内核】")
@@ -1789,6 +2072,20 @@ def cmd_status(ctx, args):
             elif s["state"]=="ok":       print(f"  ✓ {s['name']:{w}} {tag}  {s['count']:>4} 条  {core}")
             elif s["state"]=="unknown":  print(f"  · {s['name']:{w}} {tag}  本地 {s['count']} 条  {core}")
             else:                        print(f"  ✗ {s['name']:{w}} {tag}  本地 {s['count']} 条 / {s['mtime']}，{core}")
+
+    if d["dest"]:
+        x=d["dest"]
+        print("\n【写入目的地：规则服务】")
+        print(f"  {'✓' if x['ok'] else '✗'} {x['endpoint']}" + (f"  main {x['head'][:7]}" if x["head"] else "") + (f"  {x['error']}" if x["error"] else ""))
+        if x["expires"]: print(f"    GitHub 令牌到期 {x['expires']}")
+        for t in x["targets"]:
+            what=f"{CAT_CN[t['cat']]}{'IP' if t['kind']=='ip' else '域名'}"
+            mark="✓" if t["id"] and (t["exists"] or not x["ok"]) and t["provider"] else "✗"
+            print(f"  {mark} {what:6} → {t['id'] or '（未指定）'}" + (f"  Clash 里是 {t['provider']}" if t["provider"] else "  Clash 里没有对应的规则集"))
+        for r in x["submitted"][-5:]:
+            st={"pending": "等待上线", "live": "已上线", "failed": "部署失败", "timeout": "未上线（已不再等）"}[r["state"]]
+            print(f"  · {r['commit'][:7]} {st}  {', '.join(r['entries'][:3])}" + (f"  {r['kernel']}" if r.get("kernel") else ""))
+        if x["admin_url"]: print(f"  检索、修改已有规则：{x['admin_url']}")
 
     print("\n【工具回退所需的代理放行】")
     hw=max([14]+[len(f["host"]) for f in d["fallback"]])

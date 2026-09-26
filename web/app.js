@@ -68,6 +68,13 @@ function renderStatus() {
     : `<span class="st"><span class="dot"></span>watch ${d.watch ? '运行中' : '状态未知'}</span>`);
   if (d.core && d.core.find_process_mode !== 'always') out.push('<span class="st warn"><span class="dot"></span>进程识别未开启</span>');
   d.fallback.filter((f) => !f.ok).forEach((f) => out.push(`<span class="st bad"><span class="dot"></span>${esc(f.host)} 未放行</span>`));
+  if (d.dest) {
+    const wait = d.dest.submitted.filter((r) => r.state === 'pending').length;
+    const broke = d.dest.submitted.filter((r) => r.state === 'failed' || r.state === 'timeout').length;
+    if (!d.dest.ok) out.push(`<span class="st bad" title="${esc(d.dest.error)}"><span class="dot"></span>规则服务连不上</span>`);
+    else if (broke) out.push(`<span class="st bad"><span class="dot"></span>${broke} 次提交没上线 · 见 status</span>`);
+    else if (wait) out.push(`<span class="st warn"><span class="dot"></span>${wait} 次提交等待上线</span>`);
+  }
   if (DISPLAY.zoomOff) out.push(`<span class="st warn"><span class="dot"></span>浏览器缩放 ${pct(DISPLAY.zoomOff)} · Ctrl+0 复原</span>`);
   const m = /^\[\d{4}-(\d\d-\d\d) (\d\d:\d\d)/.exec(d.last_log || '');
   const tip = [...(d.log || []), '', DISPLAY.text].join('\n');
@@ -491,8 +498,8 @@ async function routedApply() {
 // ---------------- 规则 ----------------
 async function loadRules() {
   const [r, t] = await Promise.all([api('/api/rules'), api('/api/tidy')]);
-  S.rules.sets = r.sets; S.rules.tidy = t;
-  if (!r.sets.some((s) => s.name === S.rules.sel)) S.rules.sel = (r.sets.find((s) => s.kind === 'domain' && s.cat === 'proxy') || r.sets[0]).name;
+  S.rules.sets = r.sets; S.rules.tidy = t; S.rules.dest = r.dest || null;
+  if (r.sets.length && !r.sets.some((s) => s.name === S.rules.sel)) S.rules.sel = (r.sets.find((s) => s.kind === 'domain' && s.cat === 'proxy') || r.sets[0]).name;
   if (S.page === 'rules') render();
 }
 const setLabel = (s) => `${CAT_CN[s.cat]} · ${s.kind === 'ip' ? 'IP' : '域名'}`;
@@ -503,6 +510,13 @@ function tidyCount() {
 function rulesHTML() {
   const U = S.rules;
   if (!U.sets) return '<div class="empty">读取中…</div>';
+  if (U.dest) {   // 归类决定写进规则服务：规则的检索、修改在它的管理页做
+    const link = U.dest.admin_url ? `<p><a class="btn" href="${esc(U.dest.admin_url)}" target="_blank" rel="noreferrer">打开规则服务的管理页</a></p>` : '<p class="muted">settings.json 的 destination 没写 admin_url，这里给不出管理页的链接。</p>';
+    return `<section class="pane"><div class="empty" style="text-align:left;max-width:640px;margin:48px auto">
+      <h2 style="font-size:17px;margin:0 0 8px">规则在规则服务上</h2>
+      <p>待审和地域放行里的归类，直接写进规则服务（<span class="mono">${esc(U.dest.endpoint)}</span>），上线后自动让 Clash 重新取。</p>
+      <p>检索、改类、删除已有规则，在规则服务自己的管理页上做。</p>${link}</div></section>`;
+  }
   const st = Object.fromEntries((S.status?.sets || []).map((s) => [s.name, s]));
   const cur = U.sets.find((s) => s.name === U.sel) || U.sets[0];
   const nav = U.sets.map((s) => {

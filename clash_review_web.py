@@ -55,6 +55,10 @@ def _rec(host, r, kind):
         d["info"] = cr.enrich_ip(host, ip_table())
     return d
 
+def _written_to(ctx, kind, cat):
+    """提示里写进了哪个规则集：规则服务的规则集 id，或本机收件箱的名字。"""
+    return ((ctx.dest.rulesets.get(kind) or {}).get(cat) or "?") if ctx.dest else ctx.names[kind][cat]
+
 def api_status(ctx, q):
     d = cr.status_data(ctx)
     d["log"] = cr.scanlog_tail(ctx, 3)
@@ -100,7 +104,7 @@ def api_pending_apply(ctx, body):
         gone = cr.ignore_pending(ctx, ignore)
         notes += [{"k": "忽略", "cat": "", "t": f"{h}（移出待审，未写规则；再出现会回来）"} for h in gone]
     for cat, kind, added, ns in out:
-        name = ctx.names[kind][cat]
+        name = _written_to(ctx, kind, cat)
         notes += [{"k": "写入", "cat": cat, "t": f"{name}  {e}"} for e in added]
         notes += [{"k": "提示", "cat": "", "t": n} for n in ns]
     cr.append_decisions(ctx, log)
@@ -146,14 +150,14 @@ def api_routed_apply(ctx, body):
     notes = []
     if dr:
         added, ns = cr.routed_classify(ctx, "direct", dr)
-        notes += [{"k": "写入", "cat": "direct", "t": ctx.names["ip" if cr.is_ip_token(e) else "domain"]["direct"] + "  " + e} for e in added]
+        notes += [{"k": "写入", "cat": "direct", "t": _written_to(ctx, "ip" if cr.is_ip_token(e) else "domain", "direct") + "  " + e} for e in added]
         notes += [{"k": "提示", "cat": "", "t": n} for n in ns]
     if keep:
         cr.save_keepproxy(ctx, cr.load_keepproxy(ctx) | set(keep))
         notes.append({"k": "看过", "cat": "", "t": f"{len(keep)} 项保持代理，不再出现在「可改直连」里"})
     if rej:
         added, ns = cr.routed_classify(ctx, "reject", rej)
-        notes += [{"k": "写入", "cat": "reject", "t": ctx.names["ip" if cr.is_ip_token(e) else "domain"]["reject"] + "  " + e} for e in added]
+        notes += [{"k": "写入", "cat": "reject", "t": _written_to(ctx, "ip" if cr.is_ip_token(e) else "domain", "reject") + "  " + e} for e in added]
         notes += [{"k": "提示", "cat": "", "t": n} for n in ns]
     if ok:
         cr.save_reviewed(ctx, cr.load_reviewed(ctx) | set(ok))
@@ -168,6 +172,8 @@ def _set_of(ctx, name):
     raise ApiError(f"未知规则集 {name}")
 
 def api_rules(ctx, q):
+    if ctx.dest:     # 规则在规则服务上：检索、修改在它的管理页做，这里只给链接（见 docs/destinations.md）
+        return {"sets": [], "dest": {"endpoint": ctx.dest.endpoint, "admin_url": ctx.dest.admin_url}}
     sets = []
     for kind in ("domain", "ip"):
         for cat in cr.CAT_ORDER:
@@ -394,7 +400,10 @@ class Handler(webkit.Handler):
     server_version = "clash-review-web"
 
     def call(self, fn, arg):
-        return fn(self.ctx, arg)
+        try:
+            return fn(self.ctx, arg)
+        except cr.DestError as e:          # 写不进规则服务：原因给人看，待审不变
+            raise ApiError(f"没有写入：{e}")
 
 
 def main():
@@ -424,6 +433,8 @@ def main():
     except OSError as e:
         webkit.fail(f"端口 {args.port} 用不了（{e}）。换一个：--port 8766", "Clash Review")
     Handler.idle.start(srv)
+    if Handler.ctx.dest:                   # 已提交到规则服务的决定：上线后让内核重新取（watch 也在做，重复无害）
+        threading.Thread(target=cr.dest_settler, args=(Handler.ctx, threading.Event()), daemon=True).start()
     webkit.log(f"Clash Review 网页已启动：{url}（停止：clash_review_web.py --stop）")
     if not args.no_browser: webbrowser.open(url)
     try:

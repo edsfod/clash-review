@@ -17,5 +17,23 @@
   "fallback_hosts": {
     "example.com": "别的工具经本机代理回退时要访问它"
   },
-  "deepseek_key_file": "C:/path/to/deepseek-api-key.txt"
+  "deepseek_key_file": "C:/path/to/deepseek-api-key.txt",
+  "destination": {
+    "_说明": "有这一项时，归类决定写进自己的规则服务（写入接口），不再写上面的收件箱；没有规则服务就删掉整项。见 docs/destinations.md",
+    "endpoint": "https://rules.example.com/api/v1",
+    "key_file": "C:/path/to/write-key.txt",
+    "admin_url": "https://rules.example.com/admin/",
+    "rulesets": {
+      "domain": {
+        "reject": "common-reject",
+        "direct": "common-direct",
+        "proxy": "common-proxy"
+      },
+      "ip": {
+        "reject": "common-reject-ip",
+        "direct": "common-direct-ip",
+        "proxy": "common-proxy-ip"
+      }
+    }
+  }
 }
