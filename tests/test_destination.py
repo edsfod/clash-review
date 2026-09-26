@@ -119,6 +119,18 @@ class RuleService(unittest.TestCase):
         self.assertIn("+.new.example.com", dom)
         self.assertEqual([r["state"] for r in ctx.dest.load()["submitted"]], ["pending"])
 
+    def test_write_patches_cache_without_refetch(self):
+        ctx = self.fx.ctx()
+        before = ctx.dest.snapshot()                                               # 先有缓存
+        self.srv.sets["common-direct"].append("+.changed-elsewhere.example")       # 服务端另有改动：缓存到期前不该看到
+        cr.promote(ctx, {"proxy": ["new.example.com"]})
+        snap = ctx.dest.load()["snapshot"]
+        self.assertEqual(snap["time"], before["time"])                             # 没有重取
+        by = {x["id"]: x["entries"] for x in snap["sets"]}
+        self.assertIn("+.new.example.com", by["common-proxy"])
+        self.assertNotIn("+.changed-elsewhere.example", by["common-direct"])
+        self.assertIn("+.new.example.com", cr.load_classified(ctx)[0])
+
     def test_existing_entry_unchanged(self):
         ctx = self.fx.ctx(); self.add_pending(ctx, "x.iptoasn.com")
         out, moved = cr.promote(ctx, {"proxy": ["iptoasn.com"]})

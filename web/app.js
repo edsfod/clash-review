@@ -658,8 +658,8 @@ const HELP = {
 
 // ---------------- 事件 ----------------
 async function afterWrite() {
-  await loadStatus();
   await loadPage();
+  guard(loadStatus);      // 顶栏在后台更新，不挡列表
 }
 let qTimer = 0;
 document.addEventListener('input', (e) => {

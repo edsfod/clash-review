@@ -642,8 +642,15 @@ class Destination:
         commit=js.get("commit")
         rec={"commit": commit, "time": time.time(), "rulesets": sorted({o["ruleset"] for o in ops}),
              "entries": [e for _, _, e in adds], "state": "pending"}
-        self.update(lambda d: d.update(snapshot=None, submitted=d["submitted"] + ([rec] if commit else [])))
-        self.snapshot(0)          # 立即重取：刚写的条目马上算作「已有规则」，watch 不会把它们放回待审
+        added={}
+        for (k, c), es in done.items(): added.setdefault(self.target(k, c), []).extend(es)
+        def apply(d):
+            # 刚写的条目直接加进缓存，马上算作「已有规则」（watch 不会把它们放回待审）；不为此再读一次服务端，省一个来回。
+            # 缓存的时间不变，到期照常重取服务端的真实内容。
+            for x in (d["snapshot"] or {}).get("sets", []):
+                if x["id"] in added: x["entries"]=list(x.get("entries") or [])+added[x["id"]]
+            if commit: d["submitted"].append(rec)
+        self.update(apply)
         return commit, done, list(js.get("notes") or [])
 
     def pending(self):
@@ -1926,15 +1933,16 @@ def decisions_status(ctx):
     due=len(new)>=DECISIONS_DUE or (len(new)>=DECISIONS_DUE_SLOW[0] and days>=DECISIONS_DUE_SLOW[1])
     return {"total": len(ds), "new": len(new), "since": since, "due": due}
 
-def status_data(ctx):
-    """status 的数据部分（命令行与网页共用）。bad 为需要处理的问题列表，空即一切正常。"""
+def status_data(ctx, live=False):
+    """status 的数据部分（命令行与网页共用）。bad 为需要处理的问题列表，空即一切正常。
+    live：配了规则服务时当场问一次服务端（命令行）；网页顶栏刷新得勤，用缓存。"""
     d={"core":None, "core_error":"", "generated":"", "sets":[], "fallback":[], "watch":None,
        "last_log":"", "pending":{}, "routed":0, "bad":[], "names":ctx.names, "proxy_group":ctx.proxy_group,
        "match":ctx.layout["match"], "guessed":ctx.guessed, "order":list(ctx.order["domain"])}
     bad=d["bad"]; provs=None
     if not ctx.layout["found"]: bad.append("配置目录里没有 clash-verge.yaml，规则集名与代理组读不到（先在 Clash Verge 里激活一次配置）")
     if ctx.guessed and not ctx.dest: bad.append("规则里找不到这些规则集，按默认名猜的：" + "、".join(ctx.guessed) + "（在 settings.json 的 rulesets 里指定）")
-    d["dest"]=dest_status(ctx, bad) if ctx.dest else None
+    d["dest"]=dest_status(ctx, bad, live) if ctx.dest else None
     if ctx.layout["found"] and (ctx.layout["match"] or "").upper()!="REJECT":
         bad.append(f"规则最后一条是 MATCH,{ctx.layout['match']}，不是 MATCH,REJECT：没有「漏网」，待审清单不会有东西")
     try:
@@ -2010,24 +2018,32 @@ def status_data(ctx):
     d["decisions"]=decisions_status(ctx)
     return d
 
-def dest_status(ctx, bad):
-    """规则服务目的地的现状：连得上没有、密钥对不对、每类写进哪个规则集、Clash 里对不对得上、已提交的上线没有。"""
+def dest_status(ctx, bad, live=False):
+    """规则服务目的地的现状：连得上没有、密钥对不对、每类写进哪个规则集、Clash 里对不对得上、已提交的上线没有。
+    live：当场问一次服务端（命令行 status）；否则用缓存的服务端条目判断（网页顶栏常刷新，每次联网要一两秒）。"""
     dest=ctx.dest
-    try: dest.settle()
+    try:
+        if dest.pending(): dest.settle()
     except Exception: pass
     out={"endpoint": dest.endpoint, "admin_url": dest.admin_url, "ok": False, "error": "", "head": "", "expires": "",
          "targets": [], "submitted": dest.load()["submitted"]}
-    try:
-        status, headers, js = dest.call("GET", "/rulesets")
-        if status==200 and isinstance(js, list):
-            out.update(ok=True, head=headers.get("x-head", ""), expires=headers.get("x-credential-expires", ""))
-        elif status==401: out["error"]="写入密钥不对"
-        else: out["error"]=f"HTTP {status}：{(js or {}).get('detail', '') if isinstance(js, dict) else ''}"
-    except DestError as e:
-        out["error"]=str(e); js=None
+    if live:
+        try:
+            status, headers, js = dest.call("GET", "/rulesets")
+            if status==200 and isinstance(js, list):
+                out.update(ok=True, head=headers.get("x-head", ""), expires=headers.get("x-credential-expires", ""))
+            elif status==401: out["error"]="写入密钥不对"
+            else: out["error"]=f"HTTP {status}：{(js or {}).get('detail', '') if isinstance(js, dict) else ''}"
+        except DestError as e:
+            out["error"]=str(e); js=None
+        ids={s["id"]: s for s in js} if out["ok"] else {}
+        snap=dest.snapshot()
+    else:
+        snap=dest.snapshot()
+        if snap and not snap.get("stale"): out.update(ok=True, head=snap.get("head", ""), expires=snap.get("expires", ""))
+        else: out["error"]=(snap or {}).get("stale") or dest.last_error or "还没取到规则服务上的规则集"
+        ids={s["id"]: s for s in snap["sets"]} if out["ok"] else {}
     if not out["ok"]: bad.append(f"规则服务：{out['error']}（归类写不进去）")
-    ids={s["id"]: s for s in js} if out["ok"] else {}
-    snap=dest.snapshot()
     for kind in ("domain", "ip"):
         for cat in CAT_ORDER:
             rid=(dest.rulesets.get(kind) or {}).get(cat)
@@ -2049,7 +2065,7 @@ def dest_status(ctx, bad):
     return out
 
 def cmd_status(ctx, args):
-    d=status_data(ctx); bad=d["bad"]
+    d=status_data(ctx, live=True); bad=d["bad"]
     print("【内核】")
     if d["core"]:
         c=d["core"]
