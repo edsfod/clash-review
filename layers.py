@@ -86,9 +86,10 @@ if __name__ == "__main__":
             for o in sorted(x["options"], key=lambda o: -o["confidence"]): print(f"        {CN[o['choice']]} {o['confidence']:>3}：{o['reason']}")
 
 # ---------------- 给网页用：带发起进程、前后连接的一项 ----------------
-def explain_item(item, ctx, payloads, model=True, include_ctx=False):
+def explain_item(item, ctx, payloads, model=True, include_ctx=False, remember=True):
     """item：{kind: pending|suspicious|todirect, host, count?, procs?, ctx?, bucket?, reasons?, sites?}。
-    include_ctx：是否把前后连接（站点名）发给模型。按外发规则，只有单行「理由」时才发，「为本页全部生成」不发。"""
+    include_ctx：是否把前后连接（站点名）发给模型。按外发规则，只有单行「理由」时才发，「为本页全部生成」不发。
+    remember：把模型给的身份写进身份缓存；评估（eval_decisions.py --requery）不写。"""
     import datetime
     host = item["host"]; kind = item.get("kind", "pending"); is_ip = cr.is_ip(host)
     if is_ip:
@@ -115,7 +116,7 @@ def explain_item(item, ctx, payloads, model=True, include_ctx=False):
             r = {"ok": False, "error": str(e)}
         if r.get("ok"):
             x = r["result"]; md = x["decision"]
-            advisor.identity_put(host, x, "deepseek-flash", kind)        # 身份与页面无关，顺带缓存（见 advisor「缓存规则」）
+            if remember: advisor.identity_put(host, x, "deepseek-flash", kind)        # 身份与页面无关，顺带缓存（见 advisor「缓存规则」）
             out["prompt_hash"] = advisor.prompt_hash()
             out["model"] = {k: x.get(k) for k in ("decision", "votes", "owner", "owner_basis", "function", "trigger", "reason",
                                                    "confidence", "scope", "block_impact", "options")}
