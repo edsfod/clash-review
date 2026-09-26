@@ -131,7 +131,7 @@ def detect_layout(cfg):
         cat="reject" if target.upper() in ("REJECT", "REJECT-DROP") else "direct" if target.upper()=="DIRECT" else "proxy"
         path=p.get("path") or None
         if path and not os.path.isabs(path): path=os.path.normpath(os.path.join(cfg, path))
-        out["all"].append({"name":name, "kind":kind, "cat":cat, "type":typ, "path":path, "url":p.get("url") or "",
+        out["all"].append({"name":name, "kind":kind, "cat":cat, "type":typ, "path":path, "url":p.get("url") or "", "proxy":p.get("proxy") or "",
                            "format":(p.get("format") or "yaml").lower(), "rank":rank})
         if typ!="file" or not path or cat in out["sets"][kind]: continue
         out["sets"][kind][cat]={"name":name, "path":path}
@@ -523,7 +523,7 @@ class data_lock:
 DEST_TTL = 600          # 秒：服务端条目的缓存多久重取一次（watch 每次落盘都读）
 DEST_GIVE_UP = 1800     # 秒：提交后这么久仍未上线，不再等
 DEST_KEEP = 86400       # 秒：已结束的提交记录保留多久（status 里看得到）
-DEST_DIRECT_TIMEOUT = 8 # 秒：第一次试直连的超时；连不上改经本机代理，并记住
+DEST_DIRECT_TIMEOUT = 8 # 秒：直连最多等这么久，再改经本机代理（先后见 Destination.routes）
 
 class DestError(Exception):
     """写到规则服务失败。消息给人看；待审里的条目不动。"""
@@ -537,12 +537,12 @@ class Destination:
         self.path=os.path.join(ctx.review, "destination.json")
         self.retry_at=0.0; self.last_error=""
 
-    # -- 状态文件：{"route", "snapshot": {time, head, expires, sets: [{id, path, version, behavior, entries}]}, "submitted": [...]} --
+    # -- 状态文件：{"snapshot": {time, head, expires, sets: [{id, path, version, behavior, entries}]}, "submitted": [...]} --
     def load(self):
         try:
             with open(self.path, encoding="utf-8") as f: d=json.load(f)
         except (OSError, ValueError): d={}
-        d.setdefault("route", None); d.setdefault("snapshot", None); d.setdefault("submitted", [])
+        d.pop("route", None); d.setdefault("snapshot", None); d.setdefault("submitted", [])     # route：v1.2.0 记过线路，已不用
         return d
 
     def update(self, fn):
@@ -558,26 +558,31 @@ class Destination:
         if not k: raise DestError(f"写入密钥文件是空的：{p}")
         return k
 
+    def routes(self):
+        """先走哪条线路。Clash 里对应这个服务的 http 规则集写了 proxy（内核自己也经代理组取它），就先经本机代理；
+        否则先直连。不按「上次成功」记：直连 pages.dev 这类地址有时 0.2 秒、有时 40 秒才回，成功一次不代表能用（2026-09-26）。"""
+        host=urllib.parse.urlsplit(self.endpoint).hostname
+        via=any(s.get("proxy") and s["proxy"].upper()!="DIRECT" for s in self.ctx.sets
+                if s.get("url") and urllib.parse.urlsplit(s["url"]).hostname==host)
+        return ["proxy", "direct"] if via else ["direct", "proxy"]
+
     def call(self, method, path, body=None, timeout=30):
-        """(状态码, 响应头, JSON 或 None)。先用上次能用的线路；没有就先直连、再经本机代理，记住能用的那条。"""
+        """(状态码, 响应头, JSON 或 None)。按 routes() 的顺序试，直连最多等 DEST_DIRECT_TIMEOUT 秒。"""
         data=json.dumps(body).encode() if body is not None else None
         hdr={"Authorization": f"Bearer {self.key()}", "User-Agent": "clash-review", "Accept": "application/json"}
         if data is not None: hdr["Content-Type"]="application/json"
-        known=self.load()["route"]
-        routes=[known] + [r for r in ("direct", "proxy") if r!=known] if known else ["direct", "proxy"]
         errs=[]
-        for r in routes:
+        for r in self.routes():
             px={} if r=="direct" else {"http": local_proxy(), "https": local_proxy()}
             opener=urllib.request.build_opener(urllib.request.ProxyHandler(px))
             req=urllib.request.Request(self.endpoint+path, data=data, method=method, headers=hdr)
-            t=timeout if (r==known or r=="proxy") else DEST_DIRECT_TIMEOUT
             try:
-                with opener.open(req, timeout=t) as res: status, headers, raw = res.status, res.headers, res.read()
+                with opener.open(req, timeout=DEST_DIRECT_TIMEOUT if r=="direct" else timeout) as res:
+                    status, headers, raw = res.status, res.headers, res.read()
             except urllib.error.HTTPError as e:
                 status, headers, raw = e.code, e.headers, e.read()
             except OSError as e:          # URLError、超时、连接被拒都是 OSError
                 errs.append(f"{'直连' if r=='direct' else '经代理'}：{getattr(e, 'reason', e)}"); continue
-            if r!=known: self.update(lambda d: d.update(route=r))
             try: js=json.loads(raw.decode("utf-8")) if raw else None
             except ValueError: js=None
             return status, headers, js
@@ -1965,8 +1970,10 @@ def status_data(ctx):
     for rs in ctx.sets:
         if rs["inbox"]: continue
         name=rs["name"]; path=rs["path"]
-        items, err = read_set(rs)
-        raw=len(load_payload(path)) if not err and rs["format"]=="yaml" else len(items)     # 与内核比对的条数含占位
+        got=ctx.dest.items_for(rs) if ctx.dest else None      # 规则服务的规则集：比的是服务端的条目，不是本地缓存
+        items, err = got if got is not None else read_set(rs)
+        if got is not None: raw=max(1, len(items))            # 空清单在文件里是一条占位，内核也算一条
+        else: raw=len(load_payload(path)) if not err and rs["format"]=="yaml" else len(items)     # 与内核比对的条数含占位
         mt=datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S") if path and os.path.exists(path) else ""
         s={"name":name, "kind":rs["kind"], "cat":rs["cat"], "count":None if err else raw, "mtime":mt, "core_count":None,
            "core_mtime":"", "state":"unknown", "inbox":False, "type":rs["type"], "vehicle":"", "path":path or "", "error":err or ""}
@@ -1983,7 +1990,8 @@ def status_data(ctx):
                     if s["core_count"]==raw: s["state"]="ok"
                     else:
                         s["state"]="differ"
-                        bad.append(f"{name} 本地缓存 {raw} 条，内核 {s['core_count']} 条：缓存不是内核在用的那份，「已有规则」按缓存判断")
+                        bad.append(f"{name} 规则服务上 {raw} 条，内核 {s['core_count']} 条：内核还没取到最新（已提交的上线后会自动重取）" if got is not None
+                                   else f"{name} 本地缓存 {raw} 条，内核 {s['core_count']} 条：缓存不是内核在用的那份，「已有规则」按缓存判断")
                 elif s["core_mtime"]==mt and s["core_count"]==raw: s["state"]="ok"
                 else: s["state"]="stale"; bad.append(f"{name} 改动未生效")
         d["sets"].append(s)

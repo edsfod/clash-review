@@ -102,7 +102,15 @@ async function loadPage() {
   else if (S.page === 'routed') await loadRouted();
   else await loadRules();
 }
+// 按下鼠标到松开之间不重画：重画会把按钮换成新元素，按下与松开落在两个元素上，浏览器就不算一次点击。
+// 查询进行中每 1.5 秒重画一次，「应用」常被这样吞掉（2026-09-26）。松开后再补画，排在这次点击之后。
+let pointerDown = false, renderLater = false;
+document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+const pointerRelease = () => { pointerDown = false; if (renderLater) { renderLater = false; setTimeout(render, 0); } };
+document.addEventListener('pointerup', pointerRelease, true);
+document.addEventListener('pointercancel', pointerRelease, true);
 function render() {
+  if (pointerDown) { renderLater = true; return; }
   const old = document.querySelector('#page .list');
   const top = old ? old.scrollTop : 0;
   const html = S.page === 'pending' ? pendingHTML() : S.page === 'routed' ? routedHTML() : rulesHTML();
@@ -288,7 +296,7 @@ function pendingHTML() {
       <span style="font-size:13px;color:var(--ink2)">代理 <b class="mono" style="color:var(--teal)">${c.proxy}</b> · 直连 <b class="mono">${c.direct}</b> · 拉黑 <b class="mono" style="color:var(--crimson)">${c.reject}</b> · 忽略 <b class="mono">${c.ignore}</b></span>
       <span class="muted" style="font-size:13px">其余 ${c.rest} 项留在待审</span><span class="grow"></span>
       <button class="btn btn-ghost" data-act="p-clear" ${c.chosen ? '' : 'disabled'}>清除选择</button>
-      <button class="btn btn-primary" data-act="p-apply" ${c.chosen ? '' : 'disabled'}>应用 ${c.chosen} 项 <span class="kbd">Ctrl Enter</span></button></div>`;
+      <button class="btn btn-primary" data-act="p-apply" ${c.chosen && !P.applying ? '' : 'disabled'}>${P.applying ? '提交中…' : `应用 ${c.chosen} 项 <span class="kbd">Ctrl Enter</span>`}</button></div>`;
 }
 function inboxRowHTML(it, same) {
   const P = S.pending; const cur = P.choice[it.host];
@@ -313,14 +321,21 @@ function pendingPick(host, k) {
   P.focus = host;
   render();
 }
+// 写入后怎样生效：写收件箱要重新激活；写规则服务的，上线后由 watch 或本页的后台线程让 Clash 重新取
+const reactivateNote = () => S.status?.dest
+  ? { k: '生效', t: '规则服务上线后自动让 Clash 重新取，一般一两分钟；顶栏显示等待上线的提交' }
+  : { k: '生效', t: '在 Clash Verge 对当前配置右键「重新激活」后生效' };
+
 async function pendingApply() {
   const P = S.pending; const c = pendingCounts();
-  if (!c.chosen) return;
+  if (!c.chosen || P.applying) return;
   const body = { proxy: [], direct: [], reject: [], ignore: [] };
   Object.entries(P.choice).forEach(([h, k]) => body[k].push(h));
-  const r = await api('/api/pending/apply', body);
+  P.applying = true; render();       // 写规则服务要联网，要几秒：期间按钮显示「提交中…」，防止重复提交
+  let r;
+  try { r = await api('/api/pending/apply', body); } finally { P.applying = false; render(); }
   const wrote = body.proxy.length + body.direct.length + body.reject.length;
-  P.result = [...r.notes, ...(wrote ? [{ k: '生效', t: '在 Clash Verge 对当前配置右键「重新激活」后生效' }] : [])];
+  P.result = [...r.notes, ...(wrote ? [reactivateNote()] : [])];
   P.choice = {}; P.focus = null;
   await afterWrite();
 }
@@ -417,7 +432,7 @@ function routedHTML() {
     <div class="bar"><span>${tally}</span>
       <span class="muted" style="font-size:13px">${dir ? `改直连的写入 ${setName('direct')} 并移出地域放行；保持代理的以后不再出现在「可改直连」里` : `拉黑的写入 ${setName('reject')} 并移出地域放行；标为正常的以后不再出现在「可疑」里`}</span><span class="grow"></span>
       <button class="btn btn-ghost" data-act="r-clear" ${total ? '' : 'disabled'}>清除选择</button>
-      <button class="btn btn-primary" data-act="r-apply" ${total ? '' : 'disabled'}>应用 ${total} 项 <span class="kbd">Ctrl Enter</span></button></div>`;
+      <button class="btn btn-primary" data-act="r-apply" ${total && !S.routed.applying ? '' : 'disabled'}>${S.routed.applying ? '提交中…' : `应用 ${total} 项 <span class="kbd">Ctrl Enter</span>`}</button></div>`;
 }
 function routedRowsHTML() {
   const R = S.routed; const sus = R.view === 'sus';
@@ -487,9 +502,11 @@ function routedMark(host, k) {
 async function routedApply() {
   const R = S.routed; const body = { reject: [], ok: [], direct: [], keep: [], views: { ...R.markView } };   // views：裁定日志按视图区分可疑 / 可改直连
   Object.entries(R.mark).forEach(([h, k]) => body[k].push(h));
-  if (!Object.values(body).some((x) => x.length)) return;
-  const r = await api('/api/routed/apply', body);
-  R.result = [...r.notes, ...(body.reject.length || body.direct.length ? [{ k: '生效', t: '在 Clash Verge 对当前配置右键「重新激活」后生效' }] : [])];
+  if (!Object.values(body).some((x) => x.length) || R.applying) return;
+  R.applying = true; render();
+  let r;
+  try { r = await api('/api/routed/apply', body); } finally { R.applying = false; render(); }
+  R.result = [...r.notes, ...(body.reject.length || body.direct.length ? [reactivateNote()] : [])];
   R.mark = {}; R.markView = {}; R.focus = null;
   await afterWrite();
   guard(loadSusCount);
@@ -587,7 +604,7 @@ const HELP = {
 <dt>拉黑</dt><dd>写入 <code>{{reject}}</code>，以后明确拒绝，不再出现在这里（广告、追踪、没用的连接）。</dd>
 <dt>忽略</dt><dd>只从待审里移除，不写任何规则。用于一次性的噪声：测试用的站、打错的网址、命令行误把文件名当网址。不记名单——以后再连到它，会重新出现在这里。</dd>
 <dt>不选</dt><dd>应用后仍留在待审。</dd></dl>
-<p>代理、直连、拉黑写入后要在 Clash Verge 对当前配置右键「重新激活」才生效，顶栏会提示。</p>
+<p>代理、直连、拉黑写入收件箱后，要在 Clash Verge 对当前配置右键「重新激活」才生效，顶栏会提示。配了规则服务时不用：写进规则服务，上线后自动让 Clash 重新取，一般一两分钟。</p>
 <h3>各个词的意思</h3>
 <dl><dt>同一次访问</dt><dd>互相出现在对方「前后连接」里的几条，通常是同一个网页或同一个程序一起带出来的，可以整组处理。</dd>
 <dt>前后</dt><dd>这条连接前后各 8 条连接的目标主机（按条数，不按时间）。页面本身的域名通常就在里面，用来判断当时在访问什么。点中这一行再点一次，或按空格，展开全部。</dd>

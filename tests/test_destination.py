@@ -171,6 +171,13 @@ class RuleService(unittest.TestCase):
         self.assertTrue(any("common-direct-ip" in b for b in missing))
         self.assertFalse(any("按默认名猜的" in b for b in d["bad"]))
 
+    def test_routes_follow_clash_provider_proxy(self):
+        # Fixture 的 http 规则集在 rules.example 上、写了 proxy: 节点选择：同一主机的服务先经本机代理
+        self.write_settings("https://rules.example/api/v1")
+        self.assertEqual(self.fx.ctx().dest.routes(), ["proxy", "direct"])
+        self.write_settings(self.srv.endpoint)                                     # 127.0.0.1：Clash 里没有它的规则集
+        self.assertEqual(self.fx.ctx().dest.routes(), ["direct", "proxy"])
+
     def test_wrong_key(self):
         self.srv.key = "x" * 40
         ctx = self.fx.ctx()
