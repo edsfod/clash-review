@@ -1847,15 +1847,18 @@ def move_entry(ctx, kind, src_cat, dst_cat, entry, notes=None):
     added,_ = add_ips(ctx, dst_cat, [entry], notes)
     return added
 
-def routed_classify(ctx, cat, hosts):
-    """把地域放行里的主机归入 cat 类，并从地域放行清单移除（避免重复出现）。返回 (新增条目, notes)。"""
-    added=[]; notes=[]
+def routed_classify(ctx, targets):
+    """把地域放行里的主机归类（targets：{cat: [主机]}），并从地域放行清单移除（避免重复出现）。返回 ({cat: 新增条目}, notes)。
+    规则服务模式下各类一起一次提交：直连与拉黑分开提交时，一次「应用」要等两趟写入接口。"""
+    added={}; notes=[]
+    hosts=[h for hs in targets.values() for h in hs]
     # 先写规则（规则服务要联网，放在数据锁外面），写成功了再从清单移除
     if ctx.dest:
-        done=dest_add(ctx, [("ip" if is_ip(h) else "domain", cat, h) for h in hosts], notes)
-        added=[e for es in done.values() for e in es]
+        done=dest_add(ctx, [("ip" if is_ip(h) else "domain", cat, h) for cat, hs in targets.items() for h in hs], notes)
+        for (k, cat), es in done.items(): added.setdefault(cat, []).extend(es)
     else:
-        for h in hosts: added+=move_entry(ctx, "ip" if is_ip(h) else "domain", None, cat, h, notes)
+        for cat, hs in targets.items():
+            for h in hs: added.setdefault(cat, []).extend(move_entry(ctx, "ip" if is_ip(h) else "domain", None, cat, h, notes))
     with data_lock(ctx):
         routed=load_routed(ctx.routed)
         for h in hosts: routed["direct"].pop(h, None); routed["proxy"].pop(h, None)

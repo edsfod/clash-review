@@ -52,9 +52,14 @@ def _asn(ips):
     info = [cr.ip2asn_lookup(_TABLE, ip) for ip in ips] if _TABLE else []
     return sorted({f"{i['desc']}（AS{i['asn']}，{i['cc']}）" for i in info if i}), sorted({i["cc"] for i in info if i})
 
-def collect(host, net=True):
-    """返回 {cn_ips, cn_asn, cn_cc, direct, checked}；net=False 时只读缓存。"""
-    cache = _read()
+def snapshot():
+    """整个缓存读一次，传给 collect / collect_speed 的 cache 参数：逐个主机只读缓存时不必每次重读整个文件
+    （2026-09-26：「可改直连」812 个候选各读两次 140 KB 的缓存，刷新一次 3～5 秒）。"""
+    return _read()
+
+def collect(host, net=True, cache=None):
+    """返回 {cn_ips, cn_asn, cn_cc, direct, checked}；net=False 时只读缓存。cache：snapshot() 的结果，不给就现读。"""
+    cache = _read() if cache is None else cache
     c = cache.get(host)
     fresh = c and (datetime.datetime.now() - datetime.datetime.fromisoformat(c["checked"])).days < MAX_AGE_DAYS
     if c and not isinstance(c.get("direct"), dict): fresh = False      # 旧格式（只测了 HTTPS）重查
@@ -102,9 +107,9 @@ def speed(host, scheme, proxy):
     return {"scheme": scheme, "direct_ms": med(d), "proxy_ms": med(p), "direct_ok": len(d), "proxy_ok": len(p), "n": SPEED_N,
             "checked": datetime.datetime.now().isoformat(timespec="seconds")}
 
-def collect_speed(host, scheme, proxy, net=True):
-    """对比测速结果，缓存在证据缓存该主机的 speed 字段，MAX_AGE_DAYS 内不重测；net=False 时只读缓存。"""
-    cache = _read()
+def collect_speed(host, scheme, proxy, net=True, cache=None):
+    """对比测速结果，缓存在证据缓存该主机的 speed 字段，MAX_AGE_DAYS 内不重测；net=False 时只读缓存。cache 同 collect。"""
+    cache = _read() if cache is None else cache
     s = (cache.get(host) or {}).get("speed")
     fresh = s and s.get("scheme") == scheme and (datetime.datetime.now() - datetime.datetime.fromisoformat(s["checked"])).days < MAX_AGE_DAYS
     if fresh or not net: return s if fresh else None

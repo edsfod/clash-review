@@ -245,9 +245,11 @@ def _id_load():
         with open(IDENTITY, encoding="utf-8") as f: return json.load(f)
     except (OSError, ValueError): return {}
 
-def identity_get(host):
-    """缓存里的身份，没有返回 None。"""
-    return _id_load().get(host)
+def identity_get(host, table=None):
+    """缓存里的身份，没有返回 None。table：identity_all() 的结果，逐个主机查时传进来，免得每次重读整个文件。"""
+    return (_id_load() if table is None else table).get(host)
+
+def identity_all(): return _id_load()
 
 def identity_put(host, res, model, source):
     """res 含 owner / owner_basis / function。source：查询所在的页面（pending / suspicious / todirect）。"""

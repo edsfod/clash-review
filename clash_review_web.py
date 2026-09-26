@@ -148,17 +148,14 @@ def api_routed_apply(ctx, body):
             snap = {"bucket": b, "count": r.get("count"), "sites": list(r.get("sites") or []), "ports": sorted(r.get("ports") or [])}
             log.append(_decision(kind, h, "proxy" if dec == "keep" else dec, snap, adv))
     notes = []
-    if dr:
-        added, ns = cr.routed_classify(ctx, "direct", dr)
-        notes += [{"k": "写入", "cat": "direct", "t": _written_to(ctx, "ip" if cr.is_ip_token(e) else "domain", "direct") + "  " + e} for e in added]
+    if dr or rej:
+        added, ns = cr.routed_classify(ctx, {c: hs for c, hs in (("direct", dr), ("reject", rej)) if hs})
+        for c in ("direct", "reject"):
+            notes += [{"k": "写入", "cat": c, "t": _written_to(ctx, "ip" if cr.is_ip_token(e) else "domain", c) + "  " + e} for e in added.get(c, [])]
         notes += [{"k": "提示", "cat": "", "t": n} for n in ns]
     if keep:
         cr.save_keepproxy(ctx, cr.load_keepproxy(ctx) | set(keep))
         notes.append({"k": "看过", "cat": "", "t": f"{len(keep)} 项保持代理，不再出现在「可改直连」里"})
-    if rej:
-        added, ns = cr.routed_classify(ctx, "reject", rej)
-        notes += [{"k": "写入", "cat": "reject", "t": _written_to(ctx, "ip" if cr.is_ip_token(e) else "domain", "reject") + "  " + e} for e in added]
-        notes += [{"k": "提示", "cat": "", "t": n} for n in ns]
     if ok:
         cr.save_reviewed(ctx, cr.load_reviewed(ctx) | set(ok))
         notes.append({"k": "看过", "cat": "", "t": f"{len(ok)} 项标为正常，不再出现在可疑排序里"})
@@ -325,10 +322,10 @@ def api_advice_run(ctx, body):
 #   2. 过了测速的，按提示词里的策略问模型（kind=todirect，结论 direct / proxy / reject），结果存 advice.json 的 todirect:主机。
 #      模型建议保持代理的也隐藏；列表只剩没测的、待问模型的、建议直连或拉黑的（含分歧），最多 TO_DIRECT_TOP 个。
 # 隐藏的连同原因一起返回，页面可展开查看。「实测」在后台跑，进度沿用 /api/advice/job 轮询。
-def _direct_row(ctx, h, rec, t, owner, ev, a, ph):
+def _direct_row(ctx, h, rec, t, owner, ev, a, ph, ids=None):
     import advisor
     gate, speed = cr.direct_verdict(ev)
-    ident = advisor.identity_get(h)
+    ident = advisor.identity_get(h, ids)
     ips = (ev or {}).get("cn_ips")
     adv = dict(a, stale=_stale(a, ph)) if a else None
     if gate is None: state, why = "untested", "还没实测"
@@ -347,10 +344,11 @@ def _direct_rows(ctx):
     import evidence, advisor
     rows, hidden = [], []
     adv = _advice_load(ctx); ph = advisor.prompt_hash()
+    evs = evidence.snapshot(); ids = advisor.identity_all()          # 各读一次，不按主机逐个重读
     for h, rec, t, own in cr.direct_candidates(ctx):
-        ev = evidence.collect(h, net=False)
-        if ev: ev = dict(ev, speed=evidence.collect_speed(h, cr.speed_scheme(rec["ports"]), None, net=False))
-        r = _direct_row(ctx, h, rec, t, own, ev, adv.get(f"todirect:{h}"), ph)
+        ev = evidence.collect(h, net=False, cache=evs)
+        if ev: ev = dict(ev, speed=evidence.collect_speed(h, cr.speed_scheme(rec["ports"]), None, net=False, cache=evs))
+        r = _direct_row(ctx, h, rec, t, own, ev, adv.get(f"todirect:{h}"), ph, ids)
         if r["state"] == "hidden": hidden.append(r)
         elif len(rows) < cr.TO_DIRECT_TOP: rows.append(r)
     return rows, hidden

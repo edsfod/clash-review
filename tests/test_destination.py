@@ -129,6 +129,15 @@ class RuleService(unittest.TestCase):
         self.assertIn("+.new.example.com", dom)
         self.assertEqual([r["state"] for r in ctx.dest.load()["submitted"]], ["pending"])
 
+    def test_routed_classify_one_commit(self):
+        ctx = self.fx.ctx()
+        rec = lambda: dict(cr._new_rec("2026-01-01 00:00:00.000"), count=1)
+        cr.save_routed(ctx.routed, {"direct": {}, "proxy": {"cdn.example.com": rec(), "ads.example.net": rec(), "stay.example.org": rec()}})
+        added, notes = cr.routed_classify(ctx, {"direct": ["cdn.example.com"], "reject": ["ads.example.net"]})
+        self.assertEqual(len(self.srv.posts), 1)                                  # 直连与拉黑一次提交
+        self.assertEqual(added, {"direct": ["+.cdn.example.com"], "reject": ["+.ads.example.net"]})
+        self.assertEqual(list(cr.load_routed(ctx.routed)["proxy"]), ["stay.example.org"])
+
     def test_write_patches_cache_without_refetch(self):
         ctx = self.fx.ctx()
         before = ctx.dest.snapshot()                                               # 先有缓存
