@@ -17,7 +17,12 @@
   "fallback_hosts": {
     "example.com": "别的工具经本机代理回退时要访问它"
   },
-  "deepseek_key_file": "C:/path/to/deepseek-api-key.txt",
+  "model": {
+    "_说明": "问哪个模型，见 README「问哪个模型」；网页顶栏「模型」也能改。默认 Codex（ChatGPT 订阅）。另两种：{\"provider\": \"claude\", \"model\": \"haiku\"}，{\"provider\": \"openai\", \"base_url\": \"https://api.deepseek.com\", \"model\": \"deepseek-flash\", \"key_file\": \"C:/path/to/api-key.txt\"}",
+    "provider": "codex",
+    "model": "gpt-6-sol",
+    "effort": "low"
+  },
   "destination": {
     "_说明": "有这一项时，归类决定写进自己的规则服务（写入接口），不再写上面的收件箱；没有规则服务就删掉整项。见 docs/destinations.md",
     "endpoint": "https://rules.example.com/api/v1",

@@ -69,6 +69,12 @@ def resolve_config_dir(cli_dir=None):
 # 读不到或要改的写在设置目录 CONF_DIR 的 settings.json 里（格式见 settings.example.json）。文件不在就全用自动检测。
 SETTINGS = os.path.join(CONF_DIR, "settings.json")
 
+def save_setting(key, value):
+    """改 settings.json 里的一项（其余照留）。只有网页会写（单实例），不另加锁。"""
+    d=settings(); d[key]=value
+    os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+    _atomic_write_text(SETTINGS, json.dumps(d, ensure_ascii=False, indent=2))
+
 def settings():
     try:
         with open(SETTINGS, encoding="utf-8") as f: d=json.load(f)
@@ -2335,6 +2341,16 @@ def cmd_update_lists(ctx, args):
         print(f"  {fn}: " + (f"{r/1024/1024:.1f} MB" if isinstance(r, int) else f"失败 {r}"))
     _append_scanlog(ctx, "update-lists done")
 
+def cmd_codex_login(ctx, args):
+    """给本工具单独的 Codex 数据目录（var/codex）登录 ChatGPT 账号：模型选 Codex 时用（见 advisor「各家接口」）。
+    会打开浏览器；与 Codex 桌面版的登录互不影响。"""
+    import advisor, subprocess
+    os.makedirs(advisor.CODEX_HOME, exist_ok=True)
+    print(f"Codex 数据目录：{advisor.CODEX_HOME}")
+    print("接下来会打开浏览器，用 ChatGPT 账号登录并授权。")
+    r=subprocess.run([advisor.codex_exe(), "login"], env=dict(os.environ, CODEX_HOME=advisor.CODEX_HOME))
+    print("登录成功。" if advisor.codex_logged_in() else f"没有登录成功（退出码 {r.returncode}）。")
+
 def cmd_update_data(ctx, args):
     """月度任务调用：update-ipdata 与 update-lists 各跑一次，一个失败不影响另一个。"""
     for name, fn in (("update-ipdata", cmd_update_ipdata), ("update-lists", cmd_update_lists)):
@@ -2413,8 +2429,10 @@ def main():
     ul.add_argument("--no-proxy", action="store_true")
     ud=sub.add_parser("update-data", parents=[parent], help="(联网)update-ipdata + update-lists，月度任务用")
     ud.add_argument("--no-proxy", action="store_true")
+    sub.add_parser("codex-login", parents=[parent], help="模型选 Codex（ChatGPT 订阅）时，给本工具单独的 Codex 数据目录登录一次")
     args=ap.parse_args()
     cfg=resolve_config_dir(getattr(args, "config_dir", None))
+    if args.cmd=="codex-login": cmd_codex_login(None, args); return
     if args.cmd not in ("update-ipdata", "update-lists", "update-data") and not os.path.isfile(os.path.join(cfg,"profiles.yaml")):
         print(f"未定位到 Clash Verge 配置目录(缺 profiles.yaml)。当前推断: {cfg}\n可用 --config-dir 指定。", file=sys.stderr); sys.exit(2)
     ctx=Ctx(cfg)

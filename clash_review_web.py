@@ -62,7 +62,63 @@ def _written_to(ctx, kind, cat):
 def api_status(ctx, q):
     d = cr.status_data(ctx)
     d["log"] = cr.scanlog_tail(ctx, 3)
+    d["model"] = _model_brief()
     return d
+
+# ---------------- 模型选择（advisor「各家接口」；存 settings.json 的 model）----------------
+def _model_brief():
+    """顶栏用：当前模型名与能不能用（只看本机能看到的：Codex 登没登录、密钥文件在不在），不联网。"""
+    import advisor
+    try:
+        c = advisor.model_conf(); name = advisor.model_name(c); problem = ""
+        if c["provider"] == "codex" and not advisor.codex_logged_in(): problem = "Codex 还没登录"
+        elif c["provider"] == "openai" and c.get("key_file") and not os.path.exists(c["key_file"]): problem = "找不到密钥文件"
+        return {"name": name, "provider": c["provider"], "model": c.get("model") or "", "problem": problem}
+    except Exception as e:
+        return {"name": "?", "provider": "", "model": "", "problem": f"{type(e).__name__}: {e}"}
+
+def api_model(ctx, q):
+    import advisor
+    c = advisor.model_conf()
+    try: exe = advisor.codex_exe(); exe_err = ""
+    except RuntimeError as e: exe, exe_err = "", str(e)
+    return {"conf": {k: v for k, v in c.items() if k in ("provider", "model", "effort", "base_url", "key_file", "key_env")},
+            "name": advisor.model_name(c), "default": advisor.DEFAULT_MODEL,
+            "codex": {"logged_in": advisor.codex_logged_in(), "exe": exe, "error": exe_err, "models": advisor.codex_models(),
+                      "home": advisor.CODEX_HOME, "login_running": bool(_LOGIN.get("proc") and _LOGIN["proc"].poll() is None)},
+            "claude": {"models": ["haiku", "sonnet"]}}
+
+def api_model_set(ctx, body):
+    """body：{provider, model, effort?, base_url?, key_file?}。只存设置，不试调（试调要花额度，由「理由」按钮来试）。"""
+    import advisor
+    p = body.get("provider")
+    s = lambda k: str(body.get(k) or "").strip()
+    if p == "codex":
+        conf = {"provider": "codex", "model": s("model") or advisor.DEFAULT_MODEL["model"],
+                "effort": s("effort") if s("effort") in ("low", "medium", "high") else "low"}
+    elif p == "claude":
+        if s("model") not in ("haiku", "sonnet"): raise ApiError("Claude 模型只能选 haiku 或 sonnet")
+        conf = {"provider": "claude", "model": s("model")}
+    elif p == "openai":
+        if not s("base_url").startswith(("https://", "http://")): raise ApiError("接口地址要以 https:// 开头")
+        if not s("model"): raise ApiError("缺模型名")
+        if not s("key_file"): raise ApiError("缺密钥文件路径（只填文件路径，不在网页里填密钥本身）")
+        if not os.path.isfile(s("key_file")): raise ApiError(f"找不到密钥文件：{s('key_file')}")
+        conf = {"provider": "openai", "base_url": s("base_url"), "model": s("model"), "key_file": s("key_file")}
+    else: raise ApiError("未知的模型来源")
+    cr.save_setting("model", conf)
+    return {"name": advisor.model_name(conf)}
+
+_LOGIN = {}
+def api_model_login(ctx, body):
+    """在后台运行 codex login（给本工具单独的 Codex 数据目录），它会打开浏览器；页面轮询 /api/model 看登录好了没有。"""
+    import advisor, subprocess
+    if _LOGIN.get("proc") and _LOGIN["proc"].poll() is None: return {"running": True}
+    os.makedirs(advisor.CODEX_HOME, exist_ok=True)
+    _LOGIN["proc"] = subprocess.Popen([advisor.codex_exe(), "login"], env=dict(os.environ, CODEX_HOME=advisor.CODEX_HOME),
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return {"running": True}
 
 def api_pending(ctx, q):
     pending = cr.load_pending(ctx.pending)
@@ -80,7 +136,7 @@ def _advice_brief(adv, kind, host):
     if not a: return None
     m = a.get("model") or {}
     return {"recommend": a.get("recommend"), "split": a.get("split"), "model_decision": m.get("decision"), "votes": m.get("votes"),
-            "list_verdict": a.get("list_verdict"), "prompt_hash": a.get("prompt_hash"), "checked": a.get("checked"),
+            "list_verdict": a.get("list_verdict"), "prompt_hash": a.get("prompt_hash"), "model_name": a.get("model_name"), "checked": a.get("checked"),
             "model_error": a.get("model_error") or None}
 
 def _decision(kind, host, decision, snap, adv):
@@ -259,13 +315,17 @@ def api_lists(ctx, q):
     return {"missing": False, "hosts": out}
 
 def _stale(a, ph):
-    """推荐理由是否过期（规则见 advisor「缓存规则」）：只看提示词改没改过，不按时间过期。返回原因或空字符串。"""
-    return "" if a.get("prompt_hash") == ph else "提示词改过"
+    """推荐理由是否过期（规则见 advisor「缓存规则」）：看提示词改没改过、模型换没换过，不按时间过期。
+    ph：advisor.advice_version() 的 (提示词指纹, 模型名)。返回原因或空字符串。"""
+    if a.get("prompt_hash") != ph[0]: return "提示词改过"
+    return "" if (a.get("model_name") or advisor_old_model()) == ph[1] else "换了模型"
+
+def advisor_old_model(): return "openai:deepseek-flash"      # 1.4.0 之前的推荐没记模型名，都是 DeepSeek 给的
 
 def api_advice(ctx, q):
     import advisor
     kind = q.get("kind", "pending"); hosts = [h for h in q.get("hosts", "").split(",") if h]
-    adv = _advice_load(ctx); ph = advisor.prompt_hash()
+    adv = _advice_load(ctx); ph = advisor.advice_version()
     return {"advice": {h: dict(adv[f"{kind}:{h}"], stale=_stale(adv[f"{kind}:{h}"], ph)) for h in hosts if f"{kind}:{h}" in adv}}
 
 def _advice_save(ctx, kind, host, r):
@@ -343,7 +403,7 @@ def _direct_row(ctx, h, rec, t, owner, ev, a, ph, ids=None):
 def _direct_rows(ctx):
     import evidence, advisor
     rows, hidden = [], []
-    adv = _advice_load(ctx); ph = advisor.prompt_hash()
+    adv = _advice_load(ctx); ph = advisor.advice_version()
     evs = evidence.snapshot(); ids = advisor.identity_all()          # 各读一次，不按主机逐个重读
     for h, rec, t, own in cr.direct_candidates(ctx):
         ev = evidence.collect(h, net=False, cache=evs)
@@ -363,7 +423,7 @@ def api_todirect_test(ctx, body):
     want = {h for h in body.get("hosts", []) if isinstance(h, str)}
     items = [x for x in cr.direct_candidates(ctx) if x[0] in want]
     if not items: raise ApiError("这些主机已不在候选里（刷新后再试）")
-    proxy = cr.mixed_port_url(ctx); ph = advisor.prompt_hash()
+    proxy = cr.mixed_port_url(ctx); ph = advisor.advice_version()
     payloads = {c: ctx.entries("domain", c) for c in ("proxy", "direct", "reject")}
     jid = uuid.uuid4().hex[:12]
     job = {"total": len(items), "done": 0, "results": {}, "errors": {}, "running": True}
@@ -415,10 +475,11 @@ def api_advice_job(ctx, q):
 GET = {"/api/status": api_status, "/api/pending": api_pending, "/api/suggest": api_suggest,
        "/api/routed": api_routed, "/api/rules": api_rules, "/api/tidy": api_tidy,
        "/api/lists": api_lists, "/api/advice": api_advice, "/api/advice/job": api_advice_job,
-       "/api/todirect": api_todirect}
+       "/api/todirect": api_todirect, "/api/model": api_model}
 POST = {"/api/pending/apply": api_pending_apply, "/api/routed/apply": api_routed_apply, "/api/advice/run": api_advice_run, "/api/todirect/test": api_todirect_test,
         "/api/rules/add": api_rules_add, "/api/rules/delete": api_rules_delete,
-        "/api/rules/move": api_rules_move, "/api/tidy/apply": api_tidy_apply, "/api/tidy/merge": api_tidy_merge}
+        "/api/rules/move": api_rules_move, "/api/tidy/apply": api_tidy_apply, "/api/tidy/merge": api_tidy_merge,
+        "/api/model/set": api_model_set, "/api/model/login": api_model_login}
 
 
 # ---------------- HTTP（外壳在 web-kit）----------------

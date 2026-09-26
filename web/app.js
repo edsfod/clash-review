@@ -82,6 +82,7 @@ function renderStatus() {
   const tip = [...(d.log || []), '', DISPLAY.text].join('\n');
   const dec = d.decisions;
   if (dec && dec.due) out.push(`<span class="st muted" title="上次评估后新增 ${dec.new} 条人工裁定（累计 ${dec.total} 条）。在工具目录运行 python eval_decisions.py，比对模型推荐与你的决定">有 ${dec.new} 条新裁定可评估</span>`);
+  if (d.model) out.push(`<button class="st ${d.model.problem ? 'warn' : 'muted'}" data-act="model" title="问哪个模型：点开可换">${d.model.problem ? '<span class="dot"></span>' : ''}模型 ${esc(d.model.model || d.model.name)}${d.model.problem ? ' · ' + esc(d.model.problem) : ''}</button>`);
   out.push(`<span class="st muted opt" title="${esc(tip)}">上次采集 ${m ? m[2] : '—'}${d.core ? ` · 内核 ${esc(d.core.version)}` : ''}</span>`);
   $('status').innerHTML = out.join('');
   $('n-pending').textContent = d.pending.domains + d.pending.ips;
@@ -89,6 +90,65 @@ function renderStatus() {
 }
 $('status').addEventListener('click', (e) => {
   if (e.target.closest('[data-act="recheck"]')) guard(loadStatus);
+});
+
+// ---------------- 模型选择（存 settings.json 的 model，见 advisor「各家接口」）----------------
+const modelLabel = () => (S.status && S.status.model ? S.status.model.name : '模型');
+const MODEL_SRC = {
+  codex: ['Codex', 'ChatGPT 订阅，不另付费，占订阅额度；每项约 20～30 秒'],
+  claude: ['Claude', 'Claude 订阅（本机 claude -p），不另付费，占订阅额度'],
+  openai: ['OpenAI 兼容接口', '按用量付费：DeepSeek、OpenAI、Gemini 等，填接口地址、模型名与密钥文件'],
+};
+async function openModel() {
+  const d = await api('/api/model'); const c = d.conf;
+  S.model = { data: d, form: {
+    provider: c.provider, effort: c.effort || 'low',
+    model_codex: c.provider === 'codex' ? c.model : d.default.model, model_claude: c.provider === 'claude' ? c.model : 'haiku',
+    base_url: c.base_url || '', model_api: c.provider === 'openai' ? c.model : '', key_file: c.key_file || '' } };
+  renderModel(); if (!$('model').open) $('model').showModal();
+}
+function renderModel() {
+  const { data: d, form: f } = S.model; const cx = d.codex;
+  const opts = (list, cur) => [...new Set([cur, ...list].filter(Boolean))].map((m) => `<option ${m === cur ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  const radio = (p) => `<label class="msrc"><input type="radio" name="mp" value="${p}" data-mf="provider" ${f.provider === p ? 'checked' : ''}> <b>${MODEL_SRC[p][0]}</b> <span class="muted">${MODEL_SRC[p][1]}</span></label>`;
+  const login = cx.error ? `<span class="warn">${esc(cx.error)}</span>`
+    : cx.logged_in ? '<span class="muted">已登录（本工具单独的登录，与 Codex 桌面版互不影响）</span>'
+    : cx.login_running ? '<span class="warn">浏览器里登录完成后这里会变成「已登录」…</span>'
+    : '<span class="warn">还没登录</span> <button class="btn btn-sm" data-act="model-login">用 ChatGPT 账号登录</button>';
+  $('model-body').innerHTML = `
+    ${radio('codex')}
+    <div class="msub">模型 <select class="fld" data-mf="model_codex">${opts(cx.models, f.model_codex)}</select>
+      推理 <select class="fld" data-mf="effort">${opts(['low', 'medium', 'high'], f.effort)}</select> ${login}</div>
+    ${radio('claude')}
+    <div class="msub">模型 <select class="fld" data-mf="model_claude">${opts(d.claude.models, f.model_claude)}</select></div>
+    ${radio('openai')}
+    <div class="msub mgrid"><span>接口地址</span><input class="fld" data-mf="base_url" placeholder="https://api.deepseek.com" value="${esc(f.base_url)}">
+      <span>模型名</span><input class="fld" data-mf="model_api" placeholder="deepseek-flash" value="${esc(f.model_api)}">
+      <span>密钥文件</span><input class="fld" data-mf="key_file" placeholder="C:/path/to/api-key.txt（只填文件路径，不填密钥本身）" value="${esc(f.key_file)}"></div>
+    <p class="muted">现在用的：${esc(d.name)}。换了模型，已有的推荐标「已过期」，「为本页生成」时重查。</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" data-act="model-close">取消</button><button class="btn btn-primary" data-act="model-save">保存</button></div>`;
+}
+async function modelLogin() {
+  await api('/api/model/login', {});
+  for (let i = 0; i < 90 && $('model').open; i++) {        // 最多等 3 分钟
+    const d = await api('/api/model'); S.model.data.codex = d.codex; renderModel();
+    if (d.codex.logged_in || !d.codex.login_running) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  guard(loadStatus);
+}
+async function modelSave() {
+  const f = S.model.form;
+  const body = f.provider === 'codex' ? { provider: 'codex', model: f.model_codex, effort: f.effort }
+    : f.provider === 'claude' ? { provider: 'claude', model: f.model_claude }
+    : { provider: 'openai', base_url: f.base_url, model: f.model_api, key_file: f.key_file };
+  const r = await api('/api/model/set', body);
+  $('model').close(); toast(`已改用 ${r.name}`);
+  await loadStatus();
+}
+document.addEventListener('change', (e) => {
+  const k = e.target.dataset && e.target.dataset.mf; if (!k || !S.model) return;
+  S.model.form[k] = e.target.value;
 });
 
 // ---------------- 路由与渲染 ----------------
@@ -231,7 +291,7 @@ function whyHTML(kind, h) {
     <span class="lh">本机</span><div>${lines(a.layer1)}</div>
     <span class="lh">资料</span><div>${lines(a.layer3)}</div>
     <span class="lh">模型</span><div>${model}</div>
-    <div class="foot">查询于 ${esc(a.checked.replace('T', ' '))}${a.stale ? ` · <b style="color:var(--amber)">已过期（${esc(a.stale)}）</b>` : ''}${a.ctx_sent ? ' · 发给模型的有前后连接（站点名）' : ' · 没有把前后连接发给模型'} · 推荐只作参考，不会替你选
+    <div class="foot">查询于 ${esc(a.checked.replace('T', ' '))}${a.model_name ? ` · ${esc(a.model_name)}` : ''}${a.stale ? ` · <b style="color:var(--amber)">已过期（${esc(a.stale)}）</b>` : ''}${a.ctx_sent ? ' · 发给模型的有前后连接（站点名）' : ' · 没有把前后连接发给模型'} · 推荐只作参考，不会替你选
       <button class="link" data-act="why-run" data-kind="${kind}" data-h="${esc(h)}">重新查询</button></div></div>`;
 }
 function genTodo(kind) {   // 「为本页生成」只查还没查过的；上次模型出错（如余额不足）或已过期（提示词改过、超过 30 天）的算没查过
@@ -706,12 +766,16 @@ document.addEventListener('click', (e) => {
   const P = S.pending; const R = S.routed; const U = S.rules;
   if (a === 'help') { $('help-title').textContent = HELP[S.page].title; $('help-body').innerHTML = fillNames(HELP[S.page].html); $('help').showModal(); }
   else if (a === 'help-close') $('help').close();
+  else if (a === 'model') guard(openModel);
+  else if (a === 'model-close') $('model').close();
+  else if (a === 'model-login') guard(modelLogin);
+  else if (a === 'model-save') guard(modelSave);
   else if (a === 'why') toggleWhy(el.dataset.kind, h);
   else if (a === 'why-run') guard(() => runAdvice(el.dataset.kind, [h]));
   else if (a === 'gen') {
     const kind = el.dataset.kind;
     const hosts = genTodo(kind);
-    if (hosts.length && confirm(`对本页还没查过的 ${hosts.length} 项查询三层证据并问模型（DeepSeek）？\n\n不发送前后连接；已查过的跳过，要重查请在该项的理由面板里点「重新查询」。结果只作参考，不会替你选择。`)) guard(() => runAdvice(kind, hosts));
+    if (hosts.length && confirm(`对本页还没查过的 ${hosts.length} 项查询三层证据并问模型（${modelLabel()}）？\n\n不发送前后连接；已查过的跳过，要重查请在该项的理由面板里点「重新查询」。结果只作参考，不会替你选择。`)) guard(() => runAdvice(kind, hosts));
   }
   else if (a === 'p-pick') pendingPick(h, k);
   else if (a === 'p-focus') { if (P.focus === h) P.open[h] = !P.open[h]; P.focus = h; render(); }
@@ -725,7 +789,7 @@ document.addEventListener('click', (e) => {
   else if (a === 'r-mark') routedMark(h, k);
   else if (a === 'd-test') {
     const hosts = dirTodo();
-    if (hosts.length && confirm(`实测 ${hosts.length} 项：直连与走代理各测 3 次首字节时间。\n\n直连可用且更快的，再按策略问模型（DeepSeek）该不该直连：发送主机名、连接次数、国内解析与测速结果，不发前后连接。每项十几到几十秒。`)) guard(() => dirTest(hosts));
+    if (hosts.length && confirm(`实测 ${hosts.length} 项：直连与走代理各测 3 次首字节时间。\n\n直连可用且更快的，再按策略问模型（${modelLabel()}）该不该直连：发送主机名、连接次数、国内解析与测速结果，不发前后连接。每项十几到几十秒。`)) guard(() => dirTest(hosts));
   }
   else if (a === 'd-hidden') { R.dirShowHidden = !R.dirShowHidden; render(); }
   else if (a === 'r-focus') { R.focus = h; render(); }
@@ -781,7 +845,7 @@ function toggleWhy(kind, h) {
 
 // 键盘：只在焦点不在输入框时生效
 document.addEventListener('keydown', (e) => {
-  if ($('help').open) return;
+  if ($('help').open || $('model').open) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (e.ctrlKey && e.key === 'Enter') {
     if (S.page === 'pending') { e.preventDefault(); guard(pendingApply); }

@@ -5,7 +5,7 @@
 - 默认：比应用时已记下的模型推荐。没有推荐的（没点过「理由」或「为本页生成」）单独计数，不算对错；「分歧」项模型本来就不给推荐，单独列出。
   推荐来自哪版提示词各不相同，提示词改过之后，旧推荐说明不了现在的提示词。
 - --requery：按现在的提示词把全部裁定重问一遍模型（同一主机取最后一次决定），默认跑两遍。同一提示词两遍之间结论不同的项，
-  是模型自身的波动（2026-09-26：118 项里 9～13 项）；一致率的变化小于这个幅度，说明不了提示词变好还是变坏。
+  是模型自身的波动（2026-09-26，DeepSeek：118 项里 9～13 项，134 项里 26 项）；一致率的变化小于这个幅度，说明不了提示词变好还是变坏。
   重问不写网页的推荐缓存与身份缓存，不把前后连接发给模型（同「为本页生成」）。
 
 不作标准答案的裁定：var/testcases/decisions_untrusted.json 里列的主机（组名、理由、主机名或正则）。你当时拿不准、照着模型推荐选的，
@@ -146,7 +146,7 @@ def requery_report(items, runs, errors, secs, groups, meta):
     excluded = [d for d in items if d["decision"] not in NOT_A_CLASS and group_of(d["host"], groups)]
     show = lambda r: "分歧" if r == "split" else cn(r) if r else "没有结论"
     L = [f"# 按现在的提示词重问（{meta['time']}）", "",
-         f"提示词指纹 `{meta['prompt_hash']}`；裁定 {meta['total']} 条，按页面与主机去重后 {len(items)} 项（同一主机取最后一次决定）；"
+         f"模型 `{meta.get('model', '?')}`；提示词指纹 `{meta['prompt_hash']}`；裁定 {meta['total']} 条，按页面与主机去重后 {len(items)} 项（同一主机取最后一次决定）；"
          f"跑 {len(runs)} 遍，每遍 " + "、".join(f"{s:.0f} 秒" for s in secs) + "。",
          f"计入一致率的 {len(trusted)} 项；不作标准答案的 {len(excluded)} 项（`decisions_untrusted.json`），列在最后；"
          f"「忽略」{len(items) - len(trusted) - len(excluded)} 项不计。", ""]
@@ -191,8 +191,8 @@ def requery(ctx, ds, groups, passes, workers):
         return outcome(a)
     now = datetime.datetime.now()
     prompt = advisor.system_prompt()
-    meta = {"time": now.isoformat(timespec="minutes"), "prompt_hash": advisor.prompt_hash(prompt), "total": len(ds)}
-    print(f"重问 {len(items)} 项，跑 {passes} 遍（每遍几分钟）…", flush=True)
+    meta = {"time": now.isoformat(timespec="minutes"), "prompt_hash": advisor.prompt_hash(prompt), "model": advisor.model_name(), "total": len(ds)}
+    print(f"用 {meta['model']} 重问 {len(items)} 项，跑 {passes} 遍（每遍几分钟）…", flush=True)
     runs, errors, secs = run_passes(items, ask, passes, workers)
     L = requery_report(items, runs, errors, secs, groups, meta)
     out = os.path.join(ctx.review, "eval", f"requery-{now:%Y%m%d-%H%M}")

@@ -68,7 +68,7 @@ def explain(host, kind="pending", model=False, **kw):
         import advisor
         # 模型只看第 1 层（本机事实），不看名单：两者要各自独立，「一致」才有意义
         item = {"kind": kind, "host": host, "evidence_lines": [x for x in l1["lines"] if not x.startswith("同站")], "same_site": l1["same_site"]}
-        l2 = advisor.ask_checked("deepseek-flash", item)
+        l2 = advisor.ask_checked(None, item)
     md = l2["result"]["decision"] if l2 and l2.get("ok") else None
     rec, why, split = combine(md, l3["verdict"], kind)
     return {"host": host, "layer1": l1["lines"], "layer3": l3["lines"], "layer2": l2, "recommend": rec, "why": why, "split": split}
@@ -111,13 +111,13 @@ def explain_item(item, ctx, payloads, model=True, include_ctx=False, remember=Tr
              "bucket": item.get("bucket"), "reasons": item.get("reasons", []), "sites": item.get("sites", []) if include_ctx else [],
              "evidence_lines": [x for x in l1["lines"] if not x.startswith("同站")], "same_site": l1["same_site"]}
         try:
-            r = advisor.ask_checked("deepseek-flash", m)
+            r = advisor.ask_checked(None, m)
         except ValueError as e:                      # 不外发名单里的主机
             r = {"ok": False, "error": str(e)}
         if r.get("ok"):
             x = r["result"]; md = x["decision"]
-            if remember: advisor.identity_put(host, x, "deepseek-flash", kind)        # 身份与页面无关，顺带缓存（见 advisor「缓存规则」）
-            out["prompt_hash"] = advisor.prompt_hash()
+            if remember: advisor.identity_put(host, x, r.get("model"), kind)        # 身份与页面无关，顺带缓存（见 advisor「缓存规则」）
+            out["prompt_hash"] = advisor.prompt_hash(); out["model_name"] = r.get("model")
             out["model"] = {k: x.get(k) for k in ("decision", "votes", "owner", "owner_basis", "function", "trigger", "reason",
                                                    "confidence", "scope", "block_impact", "options")}
         else: out["model_error"] = r.get("error", "")

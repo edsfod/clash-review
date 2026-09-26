@@ -26,7 +26,7 @@
 ### 前置条件
 - Python 3.8 以上（发布包自带）。**工具仅用标准库，无需安装任何包。** `review-gui.bat` 与 `install_task.ps1` 用 `web-kit\find-python.ps1` 找解释器（注册表、py 启动器、常见安装目录、PATH），不写死路径；要指定就设环境变量 `TOOL_PYTHON`。
 - 本目录自成一体，可以整个拷走单独用（见「可迁移」）。`web-kit/`（网页外壳）与 `prompt.md`（模型的系统提示）是随工具带的副本，不要在这里改。
-- 可选的 `settings.json`（在设置目录里；格式见 `settings.example.json`）：`config_dir`、`rulesets`、`proxy_group`、`fallback_hosts`、`deepseek_key_file`、`destination`，见第四节。
+- 可选的 `settings.json`（在设置目录里；格式见 `settings.example.json`）：`config_dir`、`rulesets`、`proxy_group`、`fallback_hosts`、`model`、`destination`，见第四节。
 - 工具会自动定位 Clash Verge 配置目录；若定位失败用 `--config-dir` 指定。**`--config-dir` 必须写在子命令之后**（如 `scan --config-dir X`），写在前面会被子命令的默认值覆盖。
 
 ### 日常：常驻采集（计划任务自动运行，无需手动）
@@ -256,7 +256,7 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 | `clash_review.py` | 主工具（watch / scan / list / routed / promote / status / tidy / update-ipdata），纯标准库 |
 | `clash_review_web.py` / `web/` / `review-gui.bat` | 网页界面：`clash_review_web.py` 只写业务接口（`/api/*` 的 GET / POST 表），服务外壳（后台运行日志、失败对话框、单实例、`--stop`、空闲退出、Host / 自定义头 / Origin 校验、`/api/display`、`/api/prefs`、`/kit/*`）来自 `web-kit/webkit.py`；`web/` 为单页面（HTML/CSS/JS，无构建步骤），配色与显示设置面板来自 web-kit 的 `/kit/kit.css`、`/kit/kit.js`；不在源码目录生成 `__pycache__` |
 | `audit_candidates.py` | 复查规则集：用可疑打分给已放行（代理、直连）的条目做留一打分，挑出像广告、遥测的候选，并报告对拉黑条目的召回。只读，默认用 `var/testcases/` 的冻结基准 |
-| `advisor.py` | 第 2 层：调模型给出归类建议与理由。系统提示取自 `prompt.md` 的「背景与策略」「工具输出格式」两节；模型为 DeepSeek（API）与 Claude Haiku / Sonnet（本机 `claude -p`，替换默认系统提示、关工具、不读 CLAUDE.md）。DeepSeek 密钥取环境变量 `DEEPSEEK_API_KEY`，没有则读 `settings.json` 的 `deepseek_key_file` 所指的文件（Gemini 免费档搜索额度为 0，暂未接入） |
+| `advisor.py` | 第 2 层：调模型给出归类建议与理由。系统提示取自 `prompt.md` 的「背景与策略」「工具输出格式」两节。模型由 `settings.json` 的 `model` 选（第四节「问哪个模型」）：Codex（ChatGPT 订阅，默认 gpt-6-sol）、Claude（本机 `claude -p`）、任一 OpenAI 兼容接口（DeepSeek 等） |
 | `eval_models.py` | 第 2 层模型评估：规则集人工归类抽样、地域放行「可疑」24 项、编造主机与 statsig 三套题，结果与报告写 `var/eval/<run>/` |
 | `compare_eval.py` | 按 `var/testcases/acceptable-20260923.json` 的口径比较各版本在 A 套上的表现，错误分严重（误拉黑）、中等（放进该拉黑的）、轻微（直连代理互换） |
 | `verify_eval.py` | 核验评估结果：本机证据（国内 / 境外 DNS 视角与 ASN、直连实测、模型给的网址是否存在）能判的自动判，判不了的写成匿名人工清单 `var/eval/<run>/manual.md`；A 套按主机名分 dev / test 两半，改提示词只看 dev |
@@ -349,7 +349,24 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
   - `status` 多一节「写入目的地」（命令行当场问服务端；网页顶栏用缓存，不每次联网）：连不连得上、密钥对不对、每类写进哪个规则集、Clash 里对不对得上、GitHub 令牌何时到期（服务端给出时）、最近几次提交的状态。
   - 订阅、浏览、覆盖别人的规则集仍由 Clash Verge 与内核负责，本工具不做。
 
-检测出的不对时，在 `settings.json` 里覆盖：`rulesets`（`{"domain": {"reject": 名字, …}, "ip": {…}}`，文件按 `<配置目录>/ruleset/<名字>.yaml`）、`proxy_group`。另有 `fallback_hosts`（别的工具经本机代理回退时要访问、`status` 要检查的域名）与 `deepseek_key_file`。
+检测出的不对时，在 `settings.json` 里覆盖：`rulesets`（`{"domain": {"reject": 名字, …}, "ip": {…}}`，文件按 `<配置目录>/ruleset/<名字>.yaml`）、`proxy_group`。另有 `fallback_hosts`（别的工具经本机代理回退时要访问、`status` 要检查的域名）。
+
+### 问哪个模型
+
+「理由」「为本页生成」「实测」问的模型由 `settings.json` 的 `model` 定，网页顶栏的「模型」也能改（写回 `settings.json`）。换了模型，已有的推荐标「已过期」，「为本页生成」时重查。
+
+| `model` | 说明 |
+|---|---|
+| `{"provider": "codex", "model": "gpt-6-sol", "effort": "low"}`（默认） | ChatGPT 订阅，经 Codex 命令行 `codex exec`，不另付费、占订阅额度。一项约 20～30 秒、8000 多 token，并发 8。第一次用前登录：网页「模型」里点「用 ChatGPT 账号登录」，或 `python clash_review.py codex-login` |
+| `{"provider": "claude", "model": "haiku"}`（或 `sonnet`） | Claude 订阅，经本机 `claude -p`：替换默认系统提示、关工具、不读 CLAUDE.md |
+| `{"provider": "openai", "base_url": "https://api.deepseek.com", "model": "deepseek-flash", "key_file": "…"}` | 任一 OpenAI 兼容接口（DeepSeek、OpenAI、Gemini 等），按用量付费。密钥放文件里，这里只写路径（也可写 `key_env` 用环境变量） |
+
+没写 `model`、但有旧的 `deepseek_key_file` 时，沿用 DeepSeek（1.4.0 之前的设置）。
+
+Codex 本是写代码的 agent，这里尽量当成裸模型用（2026-09-26 实测）：
+- 用本工具单独的数据目录 `var/codex`（`CODEX_HOME`），单独登录一次，与 Codex 桌面版的登录互不影响。不用 `~/.codex`：那里的全局 `AGENTS.md` 会被带进每次调用，也没有开关能关掉（`project_doc_max_bytes` 只管项目里的）；只换一个空目录又没有登录（401）。
+- 系统提示用 `model_instructions_file` 换掉 Codex 自带的；不读用户设置与规则、不留会话、只读沙箱、关联网搜索；插件、浏览器、电脑操作、生成图片、多 agent、命令行工具等能关的功能都关掉（只关当前版本 `codex features list` 认得的）。基础开销从约 11600 token 降到约 4800；还剩几个关不掉的内置工具，只占 token。
+- 命令行取 Codex 桌面版自带的 `%LOCALAPPDATA%\OpenAI\Codex\bin\<随机目录>\codex.exe`（桌面版更新会换目录，取最新的），其次 PATH 上的 `codex`；`settings.json` 的 `codex_exe` 可指定。另装独立的 Codex 命令行没有用：是同一个程序，照样读数据目录里的 `AGENTS.md`。
 
 ---
 
@@ -380,7 +397,7 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 |---|---|---|
 | 引用工具目录以外的 web-kit | 本目录带一份副本 `web-kit/`，只导入自己那份；来历记在 `vendor.json` | 已处理 |
 | 提示词读自工具目录以外的笔记 | 改为本目录的 `prompt.md`，它就是正本 | 已处理 |
-| DeepSeek 密钥读自固定位置 | 环境变量 `DEEPSEEK_API_KEY`，或 `settings.json` 的 `deepseek_key_file`（密钥文件放哪由使用者定，工具只拿到路径） | 已处理 |
+| 模型与密钥写死 | 模型由 `settings.json` 的 `model` 选（第四节「问哪个模型」）；接口密钥放在使用者自定的文件里，工具只拿到路径 | 已处理 |
 | 本人配置的命名写死 | 规则集名、顺序、代理组、兜底、管道、mixed-port 从 `clash-verge.yaml` 读，`settings.json` 可覆盖（第四节）；别的工具的回退域名移到 `settings.json` 的 `fallback_hosts`；网页上的规则集名与匹配顺序也取检测结果 | 已处理 |
 | Python 路径写死 | `review-gui.bat`、`install_task.ps1` 改用 `web-kit\find-python.ps1` 查找；打包成 exe 后不再需要 | 已处理 |
 | 只有中文界面 | 视发布对象再定 | 未做 |
@@ -447,6 +464,7 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 
 ## 修订记录
 
+- 2026-09-26（v1.4.0）：模型可选（第四节「问哪个模型」）：默认改为 Codex（ChatGPT 订阅，gpt-6-sol，推理 low），另可选 Claude 订阅或任一 OpenAI 兼容接口；网页顶栏「模型」可改、可登录 Codex；命令行 `codex-login`。Codex 用本工具单独的数据目录与登录，不带 `~/.codex/AGENTS.md`，并关掉能关的功能。推荐与身份缓存记下模型名，换了模型旧推荐标「已过期」；`eval_decisions.py` 的报告记下模型。起因：DeepSeek 余额用完（HTTP 402），用户不想再按用量付费。
 - 2026-09-26（v1.3.4）：`eval_decisions.py` 加 `--requery`：按现在的提示词重问全部裁定，默认跑两遍估计模型自身的波动，报告、逐项结果与所用提示词存到 `var/eval/requery-<日期时间>/`；不作标准答案的裁定改为读 `var/testcases/decisions_untrusted.json`，两种评法都单独列出、不计入一致率。v1.3.3 的评估原先是临时脚本，方法并进了工具。「可改直连」应用后刷新慢：列表每个候选都重读一遍整个证据缓存与身份缓存（812 个候选，刷新一次 3～5 秒），改为每次请求各读一次（约 0.1 秒）；同一次应用里的直连与拉黑合成一个提交，不再等两趟写入接口。
 - 2026-09-26（v1.3.3）：`prompt.md` 重构并修正策略（见其修订记录）：线路按四个依据依次判断；「防中间人篡改」的理由改为按直连的实际风险（干扰、明文暴露访问对象、无签名的明文下载）；跟随只针对会识别身份的组件；学术出版商默认直连。评估方法：人工裁定里用户说明当时不懂的类别（证书状态、GitHub）不作标准答案，同一提示词跑两遍估计模型自身的波动。
 - 2026-09-26（v1.3.2）：`prompt.md` 的策略按裁定评估补充（「可改直连」一致率 46%，不一致全是模型建议直连、人工保持代理）：先排除再直连；按地区下发的服务与被它们唤起、要同一出口 IP 的主机代理；主流证书机构的证书状态服务与 GitHub 可能被中间人攻击，代理；微软与 Office 的商店、授权、目录及其唤起的下载代理；学术站点分机构 IP 认证（直连）与境外登录（代理）；来历可疑的证书站点拉黑。抽 10 个原先不一致的重问，9 个改为代理，Windows 更新的纯下载仍为直连。策略变了，已有的模型结论都算过期，重新查询才会用新策略。

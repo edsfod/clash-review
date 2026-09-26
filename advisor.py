@@ -4,8 +4,9 @@
 见其头部）。
 每次只问一项；返回模型给的 JSON（字段见该笔记「工具输出格式」）。
 
-模型（PROVIDERS）：
-- deepseek-flash：DeepSeek API（DeepSeek-V4.1-Flash）（OpenAI 兼容接口，JSON 模式），密钥取环境变量 DEEPSEEK_API_KEY，
+模型：settings.json 的 "model" 选（见下面「各家接口」），默认 Codex（ChatGPT 订阅）的 gpt-6-sol。评估脚本另可按 PROVIDERS 的名字指定：
+- codex-sol：见「各家接口」里 Codex 一段
+- deepseek-flash：DeepSeek API（OpenAI 兼容接口，JSON 模式），密钥取环境变量 DEEPSEEK_API_KEY，
   没有则读 settings.json 的 deepseek_key_file 所指的文件
 - claude-haiku / claude-sonnet：本机 Claude Code 命令行 `claude -p`，用订阅登录。用自己的系统提示替换 Claude Code 默认提示、
   关掉全部工具、不读设置与 CLAUDE.md，在空目录里运行。残留：Claude Code 仍会在系统提示前加一句
@@ -150,27 +151,54 @@ def decide(obj, kind):
     return STATUS_QUO[kind]
 
 # ---------------- 各家接口 ----------------
-def _deepseek_key():
-    """环境变量 DEEPSEEK_API_KEY 优先，其次 settings.json 的 deepseek_key_file（密钥文件放在哪由使用者定）。"""
-    k = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if k: return k
-    import clash_review as cr
-    path = cr.settings().get("deepseek_key_file")
-    if not path:
-        raise RuntimeError("没有 DeepSeek 密钥：设环境变量 DEEPSEEK_API_KEY，或在 settings.json 里写 deepseek_key_file")
+# 用哪个模型由 settings.json 的 "model" 定（网页顶栏「模型」也能改），三种：
+#   {"provider": "codex", "model": "gpt-6-sol", "effort": "low"}   ChatGPT 订阅，经 Codex 命令行（默认）
+#   {"provider": "claude", "model": "haiku"}                        Claude 订阅，经 Claude Code 命令行 claude -p
+#   {"provider": "openai", "base_url": "https://api.deepseek.com", "model": "deepseek-flash", "key_file": "..."}
+#                                                                   任何 OpenAI 兼容接口（DeepSeek、OpenAI、Gemini 等），按用量付费
+# 评估脚本仍可按 PROVIDERS 里的名字指定模型。
+DEFAULT_MODEL = {"provider": "codex", "model": "gpt-6-sol", "effort": "low"}
+
+def model_conf():
+    m = cr.settings().get("model")
+    if not isinstance(m, dict) or m.get("provider") not in ("codex", "claude", "openai"):
+        if cr.settings().get("deepseek_key_file") and m is None:      # 1.4.0 之前的设置：只写了 DeepSeek 密钥
+            return {"provider": "openai", "base_url": "https://api.deepseek.com", "model": "deepseek-flash",
+                    "key_file": cr.settings()["deepseek_key_file"]}
+        return dict(DEFAULT_MODEL)
+    return m
+
+def model_name(conf=None):
+    """记在推荐与身份缓存里的模型名，如 codex:gpt-6-sol。换了模型，旧推荐标「已过期」。"""
+    c = conf or model_conf()
+    return f"{c['provider']}:{c.get('model') or DEFAULT_MODEL['model']}"
+
+def _read_key(path, what):
     try:
         with open(path, encoding="utf-8") as f: return f.read().strip()
     except OSError as e:
-        raise RuntimeError(f"读不到 DeepSeek 密钥文件 {path}（{e}）")
+        raise RuntimeError(f"读不到{what}密钥文件 {path}（{e}）")
 
-def _deepseek(model, sysmsg, usermsg, timeout, schema=None):
+def _openai(base_url, model, key, sysmsg, usermsg, timeout, schema=None):
+    """OpenAI 兼容的 /chat/completions，JSON 模式。"""
     body = {"model": model, "messages": [{"role": "system", "content": sysmsg}, {"role": "user", "content": usermsg}],
             "response_format": {"type": "json_object"}, "stream": False}
-    req = urllib.request.Request("https://api.deepseek.com/chat/completions", data=json.dumps(body).encode("utf-8"),
-                                 headers={"Content-Type": "application/json",
-                                          "Authorization": "Bearer " + _deepseek_key()})
+    req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=json.dumps(body).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
     with urllib.request.urlopen(req, timeout=timeout) as r: d = json.load(r)
     return d["choices"][0]["message"]["content"], {"usage": d.get("usage")}
+
+def _deepseek_key():
+    """环境变量 DEEPSEEK_API_KEY 优先，其次 settings.json 的 deepseek_key_file。"""
+    k = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if k: return k
+    path = cr.settings().get("deepseek_key_file")
+    if not path:
+        raise RuntimeError("没有 DeepSeek 密钥：设环境变量 DEEPSEEK_API_KEY，或在 settings.json 里写 deepseek_key_file")
+    return _read_key(path, " DeepSeek ")
+
+def _deepseek(model, sysmsg, usermsg, timeout, schema=None):
+    return _openai("https://api.deepseek.com", model, _deepseek_key(), sysmsg, usermsg, timeout, schema)
 
 _CLEAN_DIR = None
 def _claude(model, sysmsg, usermsg, timeout, schema=None):
@@ -178,9 +206,11 @@ def _claude(model, sysmsg, usermsg, timeout, schema=None):
     exe = shutil.which("claude") or os.path.expanduser(r"~\.local\bin\claude.exe")
     if _CLEAN_DIR is None:
         _CLEAN_DIR = tempfile.mkdtemp(prefix="clash-review-claude-")
-        with open(os.path.join(_CLEAN_DIR, "system.txt"), "w", encoding="utf-8") as f: f.write(sysmsg)
+    sysfile = os.path.join(_CLEAN_DIR, f"system-{prompt_hash(sysmsg)}.txt")      # 同一进程里提示词可能改过（评估对比新旧提示词）
+    if not os.path.exists(sysfile):
+        with open(sysfile, "w", encoding="utf-8") as f: f.write(sysmsg)
     cmd = [exe, "-p", usermsg, "--model", model,
-           "--system-prompt-file", os.path.join(_CLEAN_DIR, "system.txt"),
+           "--system-prompt-file", sysfile,
            "--exclude-dynamic-system-prompt-sections", "--tools", "", "--setting-sources", "",
            "--no-session-persistence", "--output-format", "json", "--json-schema", json.dumps(schema or SCHEMA)]
     p = subprocess.run(cmd, cwd=_CLEAN_DIR, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout,
@@ -192,38 +222,138 @@ def _claude(model, sysmsg, usermsg, timeout, schema=None):
     text = json.dumps(out, ensure_ascii=False) if out is not None else d.get("result", "")
     return text, {"usage": d.get("usage"), "cost_usd": d.get("total_cost_usd"), "models": list(d.get("modelUsage", {}))}
 
+# Codex（ChatGPT 订阅）：codex exec 本是写代码的 agent，这里尽量把它当成裸模型用（2026-09-26 实测）：
+# - 单独的数据目录 CODEX_HOME = var/codex，单独登录一次（python clash_review.py codex-login）。
+#   不用 ~/.codex：那里的全局 AGENTS.md 会被带进每次调用，也没有开关能关掉（project_doc_max_bytes 只管项目里的）；
+#   单独登录是另一套凭据，不影响 Codex 桌面版的登录。
+# - 系统提示用 model_instructions_file 换掉 Codex 自带的；不读用户设置与规则；只读沙箱；关掉能关的功能（插件、浏览器、
+#   电脑操作、生成图片、多 agent、命令行工具等），基础开销从约 11600 token 降到约 4800；仍剩几个关不掉的内置工具，只占 token。
+# - 输出格式用 --output-schema 固定，最终回答写到 -o 指定的文件。
+CODEX_HOME = os.path.join(cr.DATA_DIR, "codex")
+CODEX_OFF = ["apps", "browser_use", "browser_use_external", "computer_use", "image_generation", "multi_agent", "plugins",
+             "shell_tool", "unified_exec", "view_image", "skill_search", "tool_suggest", "hooks", "goals", "sleep_tool",
+             "in_app_browser", "shell_snapshot", "workspace_dependencies", "memories", "remote_plugin", "code_mode_host"]
+_CODEX = {}     # 进程内缓存：exe 路径、这个版本认得的功能开关
+
+def codex_exe():
+    """settings.json 的 codex_exe 优先；其次 Codex 桌面版自带的命令行（%LOCALAPPDATA%\\OpenAI\\Codex\\bin\\<随机目录>\\codex.exe，
+    桌面版更新会换目录，取最新的）；再次 PATH 上的 codex。"""
+    p = cr.settings().get("codex_exe")
+    if p: return p
+    import glob
+    found = glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "OpenAI", "Codex", "bin", "*", "codex.exe"))
+    if found: return max(found, key=os.path.getmtime)
+    p = shutil.which("codex")
+    if p: return p
+    raise RuntimeError("找不到 Codex 命令行：装 Codex 桌面版，或在 settings.json 里写 codex_exe")
+
+def codex_logged_in(): return os.path.exists(os.path.join(CODEX_HOME, "auth.json"))
+
+def _codex_features(exe):
+    """这个版本认得的功能开关名（codex features list）；认不得的 --disable 会让 codex 报错，所以只关认得的。"""
+    if _CODEX.get("exe") != exe:
+        try:
+            out = subprocess.run([exe, "features", "list"], capture_output=True, encoding="utf-8", errors="replace",
+                                 timeout=30, creationflags=_NO_WINDOW).stdout
+            names = {l.split()[0] for l in out.splitlines() if l.strip() and "removed" not in l}
+        except Exception: names = set()
+        _CODEX.update(exe=exe, features=names)
+    return _CODEX["features"]
+
+def codex_models():
+    """ChatGPT 账号能用的模型（Codex 缓存的清单，隐藏的不列）。清单在 Codex 数据目录，第一次调用后才有。"""
+    for home in (CODEX_HOME, os.path.expanduser(r"~\.codex")):
+        try:
+            with open(os.path.join(home, "models_cache.json"), encoding="utf-8") as f: d = json.load(f)
+            ms = d.get("models", d) if isinstance(d, dict) else d
+            return [m["slug"] for m in sorted(ms, key=lambda m: m.get("priority", 99)) if m.get("visibility") == "list"]
+        except (OSError, ValueError, KeyError, TypeError): continue
+    return []
+
+def _codex(model, effort, sysmsg, usermsg, timeout, schema=None):
+    if not codex_logged_in():
+        raise RuntimeError("Codex 还没登录：在工具目录运行 python clash_review.py codex-login，按提示用 ChatGPT 账号登录")
+    exe = codex_exe(); known = _codex_features(exe)
+    d = tempfile.mkdtemp(prefix="clash-review-codex-")
+    try:
+        files = {"sys": os.path.join(d, "system.txt"), "schema": os.path.join(d, "schema.json"), "out": os.path.join(d, "out.txt")}
+        with open(files["sys"], "w", encoding="utf-8") as f: f.write(sysmsg)
+        with open(files["schema"], "w", encoding="utf-8") as f: json.dump(schema or SCHEMA, f)
+        cmd = [exe, "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--ignore-user-config", "--ignore-rules",
+               "-m", model, "-c", f'model_reasoning_effort="{effort}"',
+               "-c", "model_instructions_file=" + json.dumps(files["sys"]), "-c", "project_doc_max_bytes=0",
+               "-c", 'web_search="disabled"',
+               *[a for x in CODEX_OFF if x in known for a in ("--disable", x)],
+               "--output-schema", files["schema"], "-o", files["out"], "-"]
+        p = subprocess.run(cmd, cwd=d, env=dict(os.environ, CODEX_HOME=CODEX_HOME), input=usermsg, capture_output=True,
+                           timeout=timeout, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
+        log = (p.stderr or "") + (p.stdout or "")
+        try:
+            with open(files["out"], encoding="utf-8") as f: text = f.read()
+        except OSError: text = ""
+        if not text.strip():
+            errs = [l.strip() for l in log.splitlines() if "ERROR" in l or "error" in l.lower()]
+            raise RuntimeError(f"codex 没有给出回答（退出码 {p.returncode}）：{(errs[-1] if errs else log[-300:])[:300]}")
+        m = re.search(r"tokens used\s*\n\s*([\d,]+)", log)
+        return text, {"tokens": int(m.group(1).replace(",", "")) if m else None, "model": model}
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
 PROVIDERS = {
     "deepseek-flash":  lambda s, u, t, sc=None: _deepseek("deepseek-flash", s, u, t, sc),
     "claude-haiku":    lambda s, u, t, sc=None: _claude("haiku", s, u, t, sc),
     "claude-sonnet":   lambda s, u, t, sc=None: _claude("sonnet", s, u, t, sc),
+    "codex-sol":       lambda s, u, t, sc=None: _codex("gpt-6-sol", "low", s, u, t, sc),
 }
 
+def resolve(provider=None):
+    """provider：PROVIDERS 里的名字，或 None（用 settings.json 选的模型）。返回 (调用函数, 并发族, 模型名)。"""
+    if provider:
+        fam = "claude" if provider.startswith("claude") else "codex" if provider.startswith("codex") else "api"
+        return PROVIDERS[provider], fam, provider
+    c = model_conf(); name = model_name(c); p = c["provider"]
+    if p == "codex":
+        return (lambda s, u, t, sc=None: _codex(c.get("model") or DEFAULT_MODEL["model"], c.get("effort") or "low", s, u, t, sc)), "codex", name
+    if p == "claude":
+        return (lambda s, u, t, sc=None: _claude(c.get("model") or "haiku", s, u, t, sc)), "claude", name
+    if not c.get("base_url") or not c.get("model"):
+        raise RuntimeError("settings.json 的 model 缺 base_url 或 model（OpenAI 兼容接口）")
+    def call(s, u, t, sc=None):
+        key = os.environ.get(c["key_env"], "").strip() if c.get("key_env") else ""
+        if not key:
+            if not c.get("key_file"): raise RuntimeError("settings.json 的 model 缺 key_file（接口密钥文件）")
+            key = _read_key(c["key_file"], "接口")
+        return _openai(c["base_url"], c["model"], key, s, u, t, sc)
+    return call, "api", name
+
 # 同一进程内对每家接口的并发上限：所有调用方（评估、网页、批量）共用。
-# DeepSeek 在约 16 个并发时开始返回 429（2026-09-23），这里留余量取 6；claude -p 每次一个本机进程，取 CPU 核数的一半。
-_SEMS = {"deepseek": threading.BoundedSemaphore(6), "claude": threading.BoundedSemaphore(max(2, (os.cpu_count() or 8) // 2))}
+# DeepSeek 在约 16 个并发时开始返回 429（2026-09-23），接口类留余量取 6；claude -p 与 codex exec 每次一个本机进程，
+# claude 取 CPU 核数的一半；codex 一次约 10～30 秒、多是等模型，取 8。
+_SEMS = {"api": threading.BoundedSemaphore(6), "claude": threading.BoundedSemaphore(max(2, (os.cpu_count() or 8) // 2)),
+         "codex": threading.BoundedSemaphore(8)}
 
 def ask(provider, item, sysmsg=None, timeout=180, retries=4):
-    """返回 {ok, result|error, raw, seconds, meta, message}。
+    """provider：PROVIDERS 里的名字，None 为 settings.json 选的模型。返回 {ok, result|error, raw, seconds, meta, message, model}。
     限流（429）与服务端过载时按 2、4、8、16 秒退避重试；输出不合格时直接再问一次。"""
     sysmsg = sysmsg or system_prompt()
     msg = item_message(item)
-    sem = _SEMS["claude" if provider.startswith("claude") else "deepseek"]
+    fn, fam, name = resolve(provider)
     t0 = time.time(); last = None
     for attempt in range(retries + 1):
         try:
-            with sem: raw, meta = PROVIDERS[provider](sysmsg, msg, timeout)
+            with _SEMS[fam]: raw, meta = fn(sysmsg, msg, timeout)
             try:
                 res = validate(_parse_json(raw), item["kind"])
-                return {"ok": True, "result": res, "raw": raw, "seconds": round(time.time() - t0, 1), "meta": meta, "message": msg}
+                return {"ok": True, "result": res, "raw": raw, "seconds": round(time.time() - t0, 1), "meta": meta, "message": msg, "model": name}
             except ValueError as e:
                 last = {"ok": False, "error": f"输出不合格：{e}", "raw": raw, "meta": meta}
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
-            if "402" in err: err = "DeepSeek 账户余额不足（HTTP 402），充值后再试"   # 2026-09-23 首次遇到；不重试
+            if "402" in err: err = "接口账户余额不足（HTTP 402），充值后再试"   # 2026-09-23 DeepSeek 首次遇到；不重试
             last = {"ok": False, "error": err, "raw": ""}
-            if "402" in err or "余额" in err: break
+            if "402" in err or "余额" in err or "还没登录" in err or "找不到 Codex" in err or "settings.json 的 model 缺" in err: break
             if _retryable(err) and attempt < retries: time.sleep(2 ** (attempt + 1))
-    last.update(seconds=round(time.time() - t0, 1), message=msg)
+    last.update(seconds=round(time.time() - t0, 1), message=msg, model=name)
     return last
 
 # ---------------- 缓存规则（2026-09-24）----------------
@@ -239,6 +369,10 @@ _ID_LOCK = threading.Lock()
 def prompt_hash(text=None):
     """提示词指纹：策略一改，旧的推荐就过期。"""
     return hashlib.sha1((text or system_prompt()).encode("utf-8")).hexdigest()[:10]
+
+def advice_version():
+    """(提示词指纹, 模型名)：两者任一变了，已有的推荐标「已过期」。"""
+    return prompt_hash(), model_name()
 
 def _id_load():
     try:
@@ -324,7 +458,8 @@ def ask_batch(provider, items, sysmsg=None, timeout=600):
     usermsg = BATCH_NOTE.format(n=len(items)) + "\n\n" + "\n\n".join(f"【第 {i+1} 项】\n{m}" for i, m in enumerate(msgs))
     t0 = time.time()
     try:
-        raw, meta = PROVIDERS[provider](sysmsg, usermsg, timeout, BATCH_SCHEMA)
+        fn, fam, _ = resolve(provider)
+        with _SEMS[fam]: raw, meta = fn(sysmsg, usermsg, timeout, BATCH_SCHEMA)
         got = {x.get("host", "").strip().lower(): x for x in _parse_json(raw).get("items", []) if isinstance(x, dict)}
     except Exception as e:
         sec = round(time.time() - t0, 1)
@@ -372,7 +507,8 @@ def run_many(provider, items, batch=8, start=4, cap=None, sysmsg=None, on_result
     """把 items 按每批 batch 项切开，自适应并发地问。返回与 items 同序的结果列表。batch=1 即逐项问。
     on_result(item, result) 每得到一项结果就回调一次（用于边跑边落盘）。"""
     sysmsg = sysmsg or system_prompt()
-    fam_cap = cap or ((os.cpu_count() or 8) if provider.startswith("claude") else 32)
+    fam = resolve(provider)[1]
+    fam_cap = cap or {"claude": os.cpu_count() or 8, "codex": 8}.get(fam, 32)
     pool = AdaptivePool(start=start, cap=fam_cap)
     chunks = [list(range(i, min(i + batch, len(items)))) for i in range(0, len(items), batch)]
     results = [None] * len(items)
