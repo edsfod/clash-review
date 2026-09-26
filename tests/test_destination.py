@@ -24,6 +24,9 @@ class FakeService(http.server.ThreadingHTTPServer):
         self.key = "k" * 40; self.reject_422 = False; self.deploy = "pending"; self.posts = []; self.n = 0
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
+    def version(self, i):
+        return "v-" + "|".join(self.sets[i])        # 内容不变，版本就不变（同 git 的 blob 哈希）
+
     @property
     def endpoint(self):
         return f"http://127.0.0.1:{self.server_address[1]}/api/v1"
@@ -47,7 +50,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self.authed(): return
         srv = self.server
         if self.path.startswith("/api/v1/rulesets"):
-            rows = [{"id": i, "path": f"{i}.yaml", "version": f"v{len(e)}", "behavior": "ipcidr" if i.endswith("-ip") else "domain",
+            rows = [{"id": i, "path": f"{i}.yaml", "version": srv.version(i), "behavior": "ipcidr" if i.endswith("-ip") else "domain",
+                     "layer": i.split("-")[0], "category": i.split("-")[1],
                      "count": len(e), **({"entries": list(e)} if "entries=1" in self.path else {})} for i, e in srv.sets.items()]
             return self.reply(200, rows, {"x-head": "a" * 40, "x-credential-expires": "2099-01-01 00:00:00 UTC"})
         if self.path.startswith("/api/v1/deployments/"):
@@ -60,14 +64,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         srv = self.server
         srv.posts.append(body)
         if srv.reject_422: return self.reply(422, {"error": "invalid", "errors": ["common-proxy：坏条目"]})
+        stale = {i: srv.version(i) for i, v in (body.get("base") or {}).items() if srv.version(i) != v}
+        if stale: return self.reply(409, {"error": "conflict", "versions": stale})
         results = []
         for op in body["ops"]:
             items = srv.sets[op["ruleset"]]
-            if op["entry"] in items: results.append({**op, "result": "unchanged"})
+            if op["op"] == "remove":
+                if op["entry"] in items: items.remove(op["entry"]); results.append({**op, "result": "done"})
+                else: results.append({**op, "result": "unchanged"})
+            elif op["entry"] in items: results.append({**op, "result": "unchanged"})
             else: items.append(op["entry"]); results.append({**op, "result": "done"})
         srv.n += 1
         commit = f"{srv.n:040x}"
-        self.reply(202, {"commit": commit, "versions": {}, "results": results, "notes": ["服务端提示"]},
+        touched = {op["ruleset"] for op in body["ops"]}
+        self.reply(202, {"commit": commit, "versions": {i: srv.version(i) for i in touched}, "results": results, "notes": ["服务端提示"]},
                    {"location": f"/api/v1/deployments/{commit}"})
 
 
@@ -189,6 +199,48 @@ class RuleService(unittest.TestCase):
         self.assertEqual(self.fx.ctx().dest.routes(), ["proxy", "direct"])
         self.write_settings(self.srv.endpoint)                                     # 127.0.0.1：Clash 里没有它的规则集
         self.assertEqual(self.fx.ctx().dest.routes(), ["direct", "proxy"])
+
+    def test_editor_lists_service_sets(self):
+        ctx = self.fx.ctx()
+        sets = cr.dest_editor(ctx)
+        by = {s["name"]: s for s in sets}
+        self.assertEqual(len(sets), len(SERVER_SETS))
+        self.assertTrue(all(s["used"] for s in sets[:6]))                          # Clash 用到的排在前面
+        self.assertFalse(by["common-direct-ip"]["used"])
+        self.assertEqual(by["common-proxy"]["cat"], "proxy")                       # 类别取 Clash 里的去向
+        self.assertEqual(by["common-proxy"]["moves"], {"reject": "common-reject", "direct": "common-direct"})
+        self.assertEqual(by["common-reject"]["layers"], {"windows": "windows-reject"})
+        self.assertEqual(by["common-proxy"]["entries"], ["+.iptoasn.com"])
+
+    def test_edit_move_with_versions(self):
+        ctx = self.fx.ctx(); cr.dest_editor(ctx)
+        added, notes = cr.dest_edit(ctx, "move", "common-proxy", "+.iptoasn.com", "common-direct")
+        post = self.srv.posts[-1]
+        self.assertEqual(post["ops"], [{"op": "remove", "ruleset": "common-proxy", "entry": "+.iptoasn.com"},
+                                       {"op": "add", "ruleset": "common-direct", "entry": "+.iptoasn.com"}])
+        self.assertEqual(set(post["base"]), {"common-proxy", "common-direct"})
+        self.assertEqual(added, ["+.iptoasn.com"])
+        by = {x["id"]: x for x in ctx.dest.load()["snapshot"]["sets"]}             # 缓存跟着改，版本也更新
+        self.assertEqual(by["common-proxy"]["entries"], [])
+        self.assertEqual(by["common-direct"]["entries"], ["+.iptoasn.com"])
+        self.assertEqual(by["common-direct"]["version"], self.srv.version("common-direct"))
+        cr.dest_edit(ctx, "delete", "common-direct", "+.iptoasn.com")               # 用更新后的版本，接着改不冲突
+        self.assertEqual(self.srv.sets["common-direct"], [])
+
+    def test_edit_conflict(self):
+        ctx = self.fx.ctx(); cr.dest_editor(ctx)
+        self.srv.sets["common-proxy"].append("+.added-elsewhere.example")          # 管理页上先改了
+        with self.assertRaises(cr.DestError) as e: cr.dest_edit(ctx, "delete", "common-proxy", "+.iptoasn.com")
+        self.assertIn("期间被别处改过", str(e.exception))
+        self.assertIn("+.iptoasn.com", self.srv.sets["common-proxy"])             # 没有改
+        by = {x["id"]: x for x in ctx.dest.load()["snapshot"]["sets"]}             # 已重取
+        self.assertIn("+.added-elsewhere.example", by["common-proxy"]["entries"])
+
+    def test_edit_add_exact_and_normalized(self):
+        ctx = self.fx.ctx(); cr.dest_editor(ctx)
+        cr.dest_edit(ctx, "add", "common-reject", "only.example.com", exact=True)
+        cr.dest_edit(ctx, "add", "common-reject", "wide.example.com")
+        self.assertEqual(self.srv.sets["common-reject"], ["only.example.com", "+.wide.example.com"])
 
     def test_wrong_key(self):
         self.srv.key = "x" * 40

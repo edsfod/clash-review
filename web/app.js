@@ -516,10 +516,17 @@ async function routedApply() {
 async function loadRules() {
   const [r, t] = await Promise.all([api('/api/rules'), api('/api/tidy')]);
   S.rules.sets = r.sets; S.rules.tidy = t; S.rules.dest = r.dest || null;
-  if (r.sets.length && !r.sets.some((s) => s.name === S.rules.sel)) S.rules.sel = (r.sets.find((s) => s.kind === 'domain' && s.cat === 'proxy') || r.sets[0]).name;
+  if (r.sets.length && !r.sets.some((s) => s.name === S.rules.sel)) S.rules.sel = (r.sets.find((s) => s.name === r.default) || r.sets.find((s) => s.kind === 'domain' && s.cat === 'proxy') || r.sets[0]).name;
   if (S.page === 'rules') render();
 }
-const setLabel = (s) => `${CAT_CN[s.cat]} · ${s.kind === 'ip' ? 'IP' : '域名'}`;
+// 规则服务的规则集可能带层（如 common、windows），类别未知的写「?」（服务端没给、这台电脑也没用到）
+const setLabel = (s) => `${s.layer ? s.layer + ' · ' : ''}${CAT_CN[s.cat] || '?'} · ${s.kind === 'ip' ? 'IP' : '域名'}`;
+// 条目可以移到哪里：收件箱是另外两类（按类名）；规则服务是服务端给的目标规则集（同层别的类、同类别的层）
+function moveTargets(s) {
+  if (!S.rules.dest) return ['reject', 'direct', 'proxy'].filter((c) => c !== s.cat).map((c) => ({ to: c, label: `移到${CAT_CN[c]}` }));
+  return [...Object.entries(s.moves || {}).map(([c, id]) => ({ to: id, label: `移到${CAT_CN[c]}` })),
+          ...Object.entries(s.layers || {}).map(([l, id]) => ({ to: id, label: `移到${l}层` }))];
+}
 function tidyCount() {
   const T = S.rules.tidy; if (!T) return 0;
   return T.redundant.length + T.placeholder.length + T.reserved.length + T.overlap.length + T.merge.length;
@@ -527,26 +534,27 @@ function tidyCount() {
 function rulesHTML() {
   const U = S.rules;
   if (!U.sets) return '<div class="empty">读取中…</div>';
-  if (U.dest) {   // 归类决定写进规则服务：规则的检索、修改在它的管理页做
-    const link = U.dest.admin_url ? `<p><a class="btn" href="${esc(U.dest.admin_url)}" target="_blank" rel="noreferrer">打开规则服务的管理页</a></p>` : '<p class="muted">settings.json 的 destination 没写 admin_url，这里给不出管理页的链接。</p>';
-    return `<section class="pane"><div class="empty" style="text-align:left;max-width:640px;margin:48px auto">
-      <h2 style="font-size:17px;margin:0 0 8px">规则在规则服务上</h2>
-      <p>待审和地域放行里的归类，直接写进规则服务（<span class="mono">${esc(U.dest.endpoint)}</span>），上线后自动让 Clash 重新取。</p>
-      <p>检索、改类、删除已有规则，在规则服务自己的管理页上做。</p>${link}</div></section>`;
-  }
+  if (!U.sets.length) return '<div class="empty">没有规则集。</div>';
   const st = Object.fromEntries((S.status?.sets || []).map((s) => [s.name, s]));
   const cur = U.sets.find((s) => s.name === U.sel) || U.sets[0];
-  const nav = U.sets.map((s) => {
-    const x = st[s.name]; const bad = x && x.state !== 'ok';
+  const btn = (s) => {
+    const x = st[s.name]; const bad = x && x.state !== 'ok' && x.state !== 'unknown';
     return `<button class="set${s.name === cur.name ? ' on' : ''}" data-act="u-sel" data-k="${esc(s.name)}">
       <span class="mono">${esc(s.name)}</span><span class="mono" style="font-size:13px;color:var(--ink2);text-align:right">${s.entries.length}</span>
       <span style="font-size:12.5px;color:var(--ink3)">${setLabel(s)}</span><span style="font-size:12.5px;text-align:right;color:var(--amber)">${bad ? '未生效' : ''}</span></button>`;
-  }).join('');
+  };
+  const grp = (t) => `<p class="muted" style="margin:10px 12px 4px;font-size:12.5px">${t}</p>`;
+  // 规则服务：这台电脑的 Clash 用到的排在前面，其余（别的平台的层）另起一组
+  const nav = U.dest ? grp('这台电脑在用') + U.sets.filter((s) => s.used).map(btn).join('')
+      + (U.sets.some((s) => !s.used) ? grp('这台电脑没用到') + U.sets.filter((s) => !s.used).map(btn).join('') : '')
+    : U.sets.map(btn).join('');
+  if (U.dest && U.view === 'audit') U.view = 'entries';     // 体检只管本机收件箱
   const n = tidyCount();
+  const seg = U.dest ? (U.dest.admin_url ? `<a class="link" href="${esc(U.dest.admin_url)}" target="_blank" rel="noreferrer" style="font-size:13px">管理页</a>` : '')
+    : `<div class="seg" role="group" aria-label="视图"><button class="${U.view === 'entries' ? 'on' : ''}" data-act="u-view" data-k="entries">条目</button>
+        <button class="${U.view === 'audit' ? 'on' : ''}" data-act="u-view" data-k="audit">体检 <span class="n" style="color:${n ? 'var(--amber)' : 'var(--teal)'}">${n}</span></button></div>`;
   const head = `<div class="phead"><h1 class="mono">${esc(cur.name)}</h1>${helpBtn()}<span class="muted" style="font-size:13px">${setLabel(cur)} · ${cur.entries.length} 条</span>
-      <div class="seg" role="group" aria-label="视图"><button class="${U.view === 'entries' ? 'on' : ''}" data-act="u-view" data-k="entries">条目</button>
-        <button class="${U.view === 'audit' ? 'on' : ''}" data-act="u-view" data-k="audit">体检 <span class="n" style="color:${n ? 'var(--amber)' : 'var(--teal)'}">${n}</span></button></div>
-      <span class="grow"></span>${U.view === 'entries' ? `<input class="fld" style="width:240px" type="search" placeholder="搜索条目" aria-label="搜索条目" id="u-q" value="${esc(U.q)}">` : ''}</div>`;
+      ${seg}<span class="grow"></span>${U.view === 'entries' ? `<input class="fld" style="width:240px" type="search" placeholder="搜索全部规则集" aria-label="搜索全部规则集" id="u-q" value="${esc(U.q)}">` : ''}</div>`;
   let body;
   if (U.view === 'entries') {
     body = `<form class="add" id="u-add"><label for="u-new" style="font-size:13.5px;color:var(--ink2);white-space:nowrap">新增到 ${esc(cur.name)}</label>
@@ -558,18 +566,23 @@ function rulesHTML() {
   } else {
     body = `<div class="list">${auditHTML()}</div>`;
   }
+  const order = U.dest ? '改动直接提交到规则服务，上线后自动让 Clash 重新取，一般一两分钟'
+    : `匹配顺序：${catOrder()} → 其余规则（广告、国内、境外）→ 兜底拒绝`;
   return `<div class="split"><nav class="sets" aria-label="规则集">${nav}<span class="grow"></span>
-      <p class="muted" style="margin:0;padding:0 12px;font-size:12.5px;line-height:1.6">匹配顺序：${catOrder()} → 其余规则（广告、国内、境外）→ 兜底拒绝</p></nav>
+      <p class="muted" style="margin:0;padding:0 12px;font-size:12.5px;line-height:1.6">${order}</p></nav>
     <section class="pane">${head}${body}${resultHTML(U.result, 'rules')}</section></div>`;
 }
 function entriesHTML() {
   const U = S.rules; const cur = U.sets.find((s) => s.name === U.sel) || U.sets[0];
   const q = U.q.trim().toLowerCase();
-  const list = cur.entries.filter((v) => !q || v.toLowerCase().includes(q));
-  if (!list.length) return `<div class="empty">${cur.entries.length ? '没有匹配的条目。' : '这个规则集是空的。'}</div>`;
-  return list.map((v) => `<div class="row r-entry"><span class="host">${esc(v)}</span><span style="display:flex;gap:2px">
-      ${['reject', 'direct', 'proxy'].filter((c) => c !== cur.cat).map((c) => `<button class="link" data-act="u-move" data-h="${esc(v)}" data-k="${c}">移到${CAT_CN[c]}</button>`).join('')}
-      <button class="link link-del" data-act="u-del" data-h="${esc(v)}">删除</button></span></div>`).join('');
+  // 有搜索词时搜全部规则集，每条标出所在的规则集；没有时只列当前规则集
+  const rows = q ? U.sets.flatMap((s) => s.entries.filter((v) => v.toLowerCase().includes(q)).map((v) => [s, v]))
+    : cur.entries.map((v) => [cur, v]);
+  if (!rows.length) return `<div class="empty">${q ? '全部规则集里都没有匹配的条目。' : '这个规则集是空的。'}</div>`;
+  return rows.slice(0, 500).map(([s, v]) => `<div class="row r-entry"><span class="host">${esc(v)}${q ? ` <span class="muted" style="font-size:12.5px">${esc(s.name)} · ${setLabel(s)}</span>` : ''}</span><span style="display:flex;gap:2px">
+      ${moveTargets(s).map((m) => `<button class="link" data-act="u-move" data-set="${esc(s.name)}" data-h="${esc(v)}" data-k="${esc(m.to)}" data-label="${esc(m.label)}">${esc(m.label)}</button>`).join('')}
+      <button class="link link-del" data-act="u-del" data-set="${esc(s.name)}" data-h="${esc(v)}">删除</button></span></div>`).join('')
+    + (rows.length > 500 ? `<div class="empty">还有 ${rows.length - 500} 条没显示，用搜索缩小范围。</div>` : '');
 }
 function auditHTML() {
   const T = S.rules.tidy; if (!T) return '<div class="empty">读取中…</div>';
@@ -636,6 +649,8 @@ const HELP = {
 <h3>其它列</h3>
 <dl><dt>代理 · 直连</dt><dd>它现在被地域规则送去哪里。</dd><dt>最右的数字</dt><dd>累计连接次数。</dd></dl>` },
   rules: { title: '规则：这页是做什么的', html: `
+<h3>配了规则服务时</h3>
+<p>左栏是规则服务上能写的全部规则集，这台电脑的 Clash 用到的排在前面。搜索框搜全部规则集；改类、换层、删除直接提交到规则服务（写入密钥只在本机后台用），上线后自动让 Clash 重新取，一般一两分钟。期间别处（如管理页）改过同一个规则集会提示，重新操作一次即可。冗余、重叠由规则服务在写入时提示，没有体检页。下面讲的是没配规则服务时的六个收件箱。</p>
 <h3>六个规则集</h3>
 <p><code>{{reject}}</code>（拉黑）、<code>{{direct}}</code>（直连）、<code>{{proxy}}</code>（代理），各分域名版和 IP 版，名字取自 Clash 配置。待审和地域放行里的归类，最终都写进这里；这页可以直接增删改。</p>
 <p>Clash 配置里另有按网址取的规则集（<code>type: http</code>）时，它们只读：判断「是否已覆盖」、写入时的重叠提示和体检都会算上它们（读本地缓存），但这里不列出，也不会写入。</p>
@@ -718,20 +733,21 @@ document.addEventListener('click', (e) => {
   else if (a === 'u-sel') { U.sel = k; U.q = ''; U.undo = null; U.result = []; render(); }
   else if (a === 'u-view') { U.view = k; render(); }
   else if (a === 'u-del') guard(async () => {
-    const r = await api('/api/rules/delete', { set: U.sel, entry: h });
-    U.undo = { set: U.sel, entry: r.removed[0] }; U.result = [];
+    const set = el.dataset.set || U.sel;       // 搜索全部规则集时，每一行属于自己的规则集
+    const r = await api('/api/rules/delete', { set, entry: h });
+    U.undo = { set, entry: r.removed[0] }; U.result = (r.notes || []).map((t) => ({ k: '提示', t }));
     await afterWrite();
   });
   else if (a === 'u-undo') guard(async () => {
-    const r = await api('/api/rules/add', { set: U.undo.set, value: U.undo.entry });
+    const r = await api('/api/rules/add', { set: U.undo.set, value: U.undo.entry, exact: true });   // 按原样写回
     U.result = [{ k: '恢复', t: `${U.undo.set}  ${r.added.join(', ') || U.undo.entry}` }, ...r.notes.map((t) => ({ k: '提示', t }))];
     U.undo = null;
     await afterWrite();
   });
   else if (a === 'u-move') guard(async () => {
-    const r = await api('/api/rules/move', { set: U.sel, entry: h, to: k });
+    const r = await api('/api/rules/move', { set: el.dataset.set || U.sel, entry: h, to: k });
     U.undo = null;
-    U.result = [{ k: '移动', t: `${h} → ${CAT_CN[k]}${r.added.length ? '' : '（目标类已覆盖，未新增）'}` }, ...r.notes.map((t) => ({ k: '提示', t }))];
+    U.result = [{ k: '移动', t: `${h}：${el.dataset.label || k}${r.added.length ? '' : '（目标已覆盖，未新增）'}` }, ...r.notes.map((t) => ({ k: '提示', t }))];
     await afterWrite();
   });
   else if (a === 'u-tidy') guard(async () => {

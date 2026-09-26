@@ -608,7 +608,7 @@ class Destination:
             self.retry_at=time.time()+120; self.last_error=str(e)
             return snap and dict(snap, stale=str(e))
         snap={"time": time.time(), "head": headers.get("x-head", ""), "expires": headers.get("x-credential-expires", ""),
-              "sets": [{k: s.get(k) for k in ("id", "path", "version", "behavior", "entries")} for s in js]}
+              "sets": [{k: s.get(k) for k in ("id", "path", "version", "behavior", "entries", "layer", "category")} for s in js]}
         self.update(lambda d: d.update(snapshot=snap))
         return snap
 
@@ -630,28 +630,41 @@ class Destination:
         返回 (提交号或 None, {(kind, cat): 真正新增的条目}, 服务端提示)。失败抛 DestError。"""
         ops=[{"op": "add", "ruleset": self.target(k, c), "entry": e} for k, c, e in adds]
         if not ops: return None, {}, []
-        status, _, js = self.call("POST", "/changes", {"ops": ops})
+        commit, results, notes = self.change(ops)
+        done={}
+        for (k, c, e), r in zip(adds, results):
+            if r.get("result")=="done": done.setdefault((k, c), []).append(e)
+        return commit, done, notes
+
+    def change(self, ops, base=None):
+        """一批改动（op 为 add / remove），整批原子。base（{规则集: version}）给了就先核对版本，期间被别处改过返回 409。
+        成功后把改动与新版本直接写进缓存（马上算作「已有规则」，不为此再读一次服务端），并记下提交等它上线。
+        返回 (提交号或 None, 逐条结果, 服务端提示)。失败抛 DestError；409 时先重取缓存。"""
+        status, _, js = self.call("POST", "/changes", {"ops": ops, **({"base": base} if base else {})})
         js=js if isinstance(js, dict) else {}
         if status==401: raise DestError("规则服务说写入密钥不对")
         if status==422: raise DestError("规则服务拒绝了这批改动：" + "；".join(js.get("errors") or [js.get("detail", "")]))
-        if status==409: raise DestError("规则服务上的规则在提交时被别处改动了，请再试一次")
+        if status==409:
+            self.snapshot(0)
+            raise DestError("规则服务上的规则期间被别处改过，已重新读取，请再操作一次")
         if status not in (200, 202): raise DestError(f"写入失败（HTTP {status}）：{js.get('detail', '')}")
-        done={}
-        for (k, c, e), r in zip(adds, js.get("results") or []):
-            if r.get("result")=="done": done.setdefault((k, c), []).append(e)
-        commit=js.get("commit")
+        commit=js.get("commit"); versions=js.get("versions") or {}; results=js.get("results") or []
+        done=[(r["ruleset"], r["op"], r["entry"]) for r in results if r.get("result")=="done"]
         rec={"commit": commit, "time": time.time(), "rulesets": sorted({o["ruleset"] for o in ops}),
-             "entries": [e for _, _, e in adds], "state": "pending"}
-        added={}
-        for (k, c), es in done.items(): added.setdefault(self.target(k, c), []).extend(es)
+             "entries": [o["entry"] for o in ops], "state": "pending"}
         def apply(d):
-            # 刚写的条目直接加进缓存，马上算作「已有规则」（watch 不会把它们放回待审）；不为此再读一次服务端，省一个来回。
-            # 缓存的时间不变，到期照常重取服务端的真实内容。
+            # 缓存的时间不变，到期照常重取服务端的真实内容
             for x in (d["snapshot"] or {}).get("sets", []):
-                if x["id"] in added: x["entries"]=list(x.get("entries") or [])+added[x["id"]]
+                es=list(x.get("entries") or [])
+                for rid, op, e in done:
+                    if rid!=x["id"]: continue
+                    if op=="add" and e not in es: es.append(e)
+                    elif op=="remove": es=[v for v in es if v!=e]
+                x["entries"]=es
+                if versions.get(x["id"]): x["version"]=versions[x["id"]]
             if commit: d["submitted"].append(rec)
         self.update(apply)
-        return commit, done, list(js.get("notes") or [])
+        return commit, results, list(js.get("notes") or [])
 
     def pending(self):
         return [r for r in self.load()["submitted"] if r["state"]=="pending"]
@@ -693,6 +706,51 @@ class Destination:
         diff=[f"{n} 内核 {provs.get(n, {}).get('ruleCount')} 条、服务端 {max(1, len(m.get('entries') or []))} 条"
               for n, m in pairs if provs.get(n, {}).get("ruleCount")!=max(1, len(m.get("entries") or []))]
         return ("内核已重新取，但条目数不符：" + "；".join(diff)) if diff else f"内核已重新取 {len(pairs)} 个规则集，条目数一致"
+
+def dest_editor(ctx):
+    """规则页（规则服务目的地）：服务端能写的全部规则集，带条目。这台电脑的 Clash 用到的排在前面（按规则顺序），
+    类别取 Clash 里那一行的去向；没用到的取服务端给的 category（协议之外的附加字段，没有就不能改类）。
+    moves：改到别的类时写进哪个规则集（同层、同为域名或 IP）；layers：换到别的层时写进哪个规则集（服务端给了 layer 才有）。"""
+    snap=ctx.dest.snapshot(0)                     # 编辑要最新的条目与版本
+    if not snap or snap.get("stale"): raise DestError((snap or {}).get("stale") or ctx.dest.last_error or "读不到规则服务上的规则集")
+    used={}
+    for s in ctx.sets:
+        m=Destination.match(s.get("url"), snap) if s["type"]=="http" else None
+        if m and m["id"] not in used: used[m["id"]]=s
+    out=[]
+    for i, x in enumerate(snap["sets"]):
+        u=used.get(x["id"])
+        out.append({"name": x["id"], "kind": "ip" if x.get("behavior")=="ipcidr" else "domain",
+                    "cat": u["cat"] if u else (x.get("category") if x.get("category") in CAT_ORDER else None),
+                    "layer": x.get("layer") or "", "entries": list(x.get("entries") or []),
+                    "used": bool(u), "clash": u["name"] if u else "", "order": u["rank"] if u else 10**6+i})
+    for o in out:
+        o["moves"]={c: t["name"] for c in CAT_ORDER if o["cat"] and c!=o["cat"]
+                    for t in out if t["kind"]==o["kind"] and t["cat"]==c and t["layer"]==o["layer"]}
+        o["layers"]={t["layer"]: t["name"] for t in out if o["layer"] and t["layer"] and t["layer"]!=o["layer"]
+                     and t["kind"]==o["kind"] and t["cat"]==o["cat"]}
+    return sorted(out, key=lambda o: o["order"])
+
+def dest_edit(ctx, op, rid, entry, to=None, exact=False):
+    """规则页在规则服务上的改动。op：add（新增到 rid）、delete（从 rid 删）、move（从 rid 移到 to）。
+    exact：新增时按原样写（撤销删除时用），否则同收件箱：域名加 +.，单个 IP 写成 /32。
+    改动与删除带上版本号，期间别处改过就报错（缓存已重取）。返回 (新增条目, 提示)。失败抛 DestError。"""
+    snap=ctx.dest.snapshot()
+    sets={x["id"]: x for x in (snap or {}).get("sets", [])}
+    if rid not in sets or (to is not None and to not in sets): raise DestError("规则服务上没有这个规则集（刷新后再试）")
+    notes=[]
+    if op=="add":
+        kind="ip" if sets[rid].get("behavior")=="ipcidr" else "domain"
+        e=entry.strip() if exact else _dest_form(kind, entry, notes)
+        if not e: raise DestError(f"{entry} 不是{'IP 或 CIDR' if kind=='ip' else '域名'}")
+        commit, results, server = ctx.dest.change([{"op": "add", "ruleset": rid, "entry": e}])
+    else:
+        if entry not in (sets[rid].get("entries") or []): raise DestError("条目不存在（可能已被改动，刷新后再试）")
+        ops=[{"op": "remove", "ruleset": rid, "entry": entry}] + ([{"op": "add", "ruleset": to, "entry": entry}] if op=="move" else [])
+        commit, results, server = ctx.dest.change(ops, {i: sets[i].get("version") for i in {o["ruleset"] for o in ops}})
+    notes+=server
+    notes.append(f"已提交到规则服务（{commit[:7]}），上线后自动让 Clash 重新取，一般一两分钟" if commit else "没有变化")
+    return [r["entry"] for r in results if r.get("op")=="add" and r.get("result")=="done"], notes
 
 def dest_settler(ctx, stop, every=15):
     """常驻进程（watch、网页）里的后台线程：有已提交未上线的决定时，每隔一会儿查一次。"""

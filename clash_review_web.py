@@ -172,8 +172,9 @@ def _set_of(ctx, name):
     raise ApiError(f"未知规则集 {name}")
 
 def api_rules(ctx, q):
-    if ctx.dest:     # 规则在规则服务上：检索、修改在它的管理页做，这里只给链接（见 docs/destinations.md）
-        return {"sets": [], "dest": {"endpoint": ctx.dest.endpoint, "admin_url": ctx.dest.admin_url}}
+    if ctx.dest:     # 规则在规则服务上：列出服务端能写的全部规则集，经写入接口直接改（见 docs/destinations.md）
+        return {"sets": cr.dest_editor(ctx), "dest": {"endpoint": ctx.dest.endpoint, "admin_url": ctx.dest.admin_url},
+                "default": (ctx.dest.rulesets.get("domain") or {}).get("proxy")}     # 默认选中新条目写进去的代理规则集
     sets = []
     for kind in ("domain", "ip"):
         for cat in cr.CAT_ORDER:
@@ -182,20 +183,30 @@ def api_rules(ctx, q):
     return {"sets": sets}
 
 def api_rules_add(ctx, body):
-    kind, cat = _set_of(ctx, body.get("set", "")); v = str(body.get("value", "")).strip()
+    v = str(body.get("value", "")).strip()
     if not v: raise ApiError("条目为空")
+    if ctx.dest:
+        added, notes = cr.dest_edit(ctx, "add", body.get("set", ""), v, exact=bool(body.get("exact")))
+        return {"added": added, "notes": notes}
+    kind, cat = _set_of(ctx, body.get("set", ""))
     if kind == "ip" and not cr.is_ip_token(v): raise ApiError(f"{v} 不是 IP 或 CIDR")
     if kind == "domain" and (cr.is_ip_token(v) or not cr.is_domain(cr._dom_base(v))): raise ApiError(f"{v} 不是域名")
     notes = []; added = cr.move_entry(ctx, kind, None, cat, v, notes)
     return {"added": added, "notes": notes}
 
 def api_rules_delete(ctx, body):
+    if ctx.dest:
+        entry = str(body.get("entry", "")); _, notes = cr.dest_edit(ctx, "delete", body.get("set", ""), entry)
+        return {"removed": [entry], "notes": notes}
     kind, cat = _set_of(ctx, body.get("set", ""))
     removed = cr.remove_from(ctx, kind, cat, [str(body.get("entry", ""))])
     if not removed: raise ApiError("条目不存在（可能已被改动，刷新后再试）")
     return {"removed": removed}
 
 def api_rules_move(ctx, body):
+    if ctx.dest:     # to 是目标规则集（网页从 moves / layers 里取）
+        added, notes = cr.dest_edit(ctx, "move", body.get("set", ""), str(body.get("entry", "")), body.get("to", ""))
+        return {"added": added, "notes": notes}
     kind, cat = _set_of(ctx, body.get("set", "")); dst = body.get("to", "")
     if dst not in cr.CAT_ORDER or dst == cat: raise ApiError("目标分类无效")
     entry = str(body.get("entry", ""))
@@ -204,6 +215,8 @@ def api_rules_move(ctx, body):
     return {"added": added, "notes": notes}
 
 def api_tidy(ctx, q):
+    if ctx.dest:     # 体检只管本机收件箱；规则服务的冗余与重叠由服务端在写入时提示
+        return {"redundant": [], "placeholder": [], "reserved": [], "overlap": [], "merge": []}
     rep = cr.ruleset_audit(ctx)
     return {"redundant": [{"kind": k, "cat": c, "entry": p, "by": by} for k, c, p, by in rep["redundant"]],
             "placeholder": [{"kind": k, "cat": c} for k, c in rep["placeholder"]],
