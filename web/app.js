@@ -63,6 +63,7 @@ function renderStatus() {
   if (!d) return;
   const out = [];
   const stale = d.sets.filter((s) => s.state === 'stale' || s.state === 'missing');
+  (d.copies || []).forEach((c) => out.push(`<span class="st bad" title="${esc(c.path)}：从那个应用里启动的 clash-review 读写的是这份副本，与计划任务里的 watch 不是同一份数据。关掉从那里启动的，删掉这个目录，改从资源管理器或计划任务启动"><span class="dot"></span>${esc(c.package.split('_')[0])} 包里有数据副本 · 见 status</span>`));
   if (!d.core) out.push('<span class="st bad"><span class="dot"></span>连不上内核</span>');
   else if (stale.length) out.push(`<span class="st warn"><span class="dot"></span>${stale.map((s) => esc(s.name)).join('、')} 未生效 · 去 Clash Verge 重新激活 <button data-act="recheck">重新检查</button></span>`);
   else out.push('<span class="st"><span class="dot"></span>规则集已生效</span>');

@@ -2052,6 +2052,24 @@ def decisions_status(ctx):
     due=len(new)>=DECISIONS_DUE or (len(new)>=DECISIONS_DUE_SLOW[0] and days>=DECISIONS_DUE_SLOW[1])
     return {"total": len(ds), "new": len(new), "since": since, "due": due}
 
+def container_copies():
+    """应用包（MSIX）里的本工具数据副本：[(包名, 副本目录)]。
+    从 MSIX 打包的应用（如 Claude 桌面版）里启动的程序，写 %APPDATA% / %LOCALAPPDATA% 时，Windows 把写入重定向到
+    %LOCALAPPDATA%\\Packages\\<包>\\LocalCache\\{Roaming,Local}\\ 下的副本，之后那个包里的程序读到的也是副本；
+    包外的程序（计划任务里的 watch、双击启动的网页）读写真实目录。两边各改各的，数据分叉。
+    2026-10-01：Claude 会话里启动的网页读到 9-26 的旧副本，顶栏报「3 次提交没上线」，真实记录里早已上线。
+    这些程序没有包身份（GetCurrentPackageFullName 报没有包），查不出自己在包里，只能看副本在不在：包里包外都看得到它。"""
+    home=os.path.expanduser("~")
+    local=os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+    roaming=os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    pk=os.path.join(local, "Packages"); out=[]
+    for real in (CONF_DIR, DATA_DIR):
+        for base, sub in ((roaming, "Roaming"), (local, "Local")):
+            if os.path.normcase(os.path.dirname(real))!=os.path.normcase(base): continue
+            for p in glob.glob(os.path.join(pk, "*", "LocalCache", sub, os.path.basename(real))):
+                out.append((os.path.relpath(p, pk).split(os.sep)[0], p))
+    return out
+
 def status_data(ctx, live=False):
     """status 的数据部分（命令行与网页共用）。bad 为需要处理的问题列表，空即一切正常。
     live：配了规则服务时当场问一次服务端（命令行）；网页顶栏刷新得勤，用缓存。"""
@@ -2059,6 +2077,10 @@ def status_data(ctx, live=False):
        "last_log":"", "pending":{}, "routed":0, "bad":[], "names":ctx.names, "proxy_group":ctx.proxy_group,
        "match":ctx.layout["match"], "guessed":ctx.guessed, "order":list(ctx.order["domain"])}
     bad=d["bad"]; provs=None
+    d["copies"]=[{"package": k, "path": p} for k, p in container_copies()]
+    for c in d["copies"]:
+        bad.append(f"应用包 {c['package']} 里有本工具数据的副本（{c['path']}）：从那个应用里启动的 clash-review 读写的是副本，"
+                   "与计划任务里的 watch 不是同一份数据。关掉从那里启动的 clash-review，删掉这个目录，改从资源管理器或计划任务启动")
     if not ctx.layout["found"]: bad.append("配置目录里没有 clash-verge.yaml，规则集名与代理组读不到（先在 Clash Verge 里激活一次配置）")
     if ctx.guessed and not ctx.dest: bad.append("规则里找不到这些规则集，按默认名猜的：" + "、".join(ctx.guessed) + "（在 settings.json 的 rulesets 里指定）")
     d["dest"]=dest_status(ctx, bad, live) if ctx.dest else None
