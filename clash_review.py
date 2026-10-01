@@ -169,6 +169,26 @@ def is_ipv6(h):
 def is_ip(h): return is_ipv4(h) or is_ipv6(h)
 def is_domain(h): return bool(h) and not is_ipv4(h) and "." in h and ":" not in h
 
+# 命令行把文件名当网址：curl/wget 的参数里混进文件名（常见于没加引号的 * 展开成目录列表），
+# 内核照样记一条连接，主机就是文件名。不进待审。
+#   · 后缀是文件扩展名、又不是顶级域的（README.txt、a.json）：哪个程序连的都算。
+#   · 后缀同时是真实顶级域的（.md 摩尔多瓦、.py 巴拉圭、.sh、.rs……，README.md、Zed.md 都能解析）：
+#     只在命令行下载工具连的时候算，浏览器里打开 point.md 这类真实网站照常进待审。
+FILE_EXT_NOT_TLD = {"txt","json","jsonl","yaml","yml","toml","ini","cfg","conf","log","lock","bak","tmp","old","orig",
+                    "csv","xml","html","htm","css","js","mjs","cjs","ts","tsx","jsx","vue","c","h","cpp","hpp","java",
+                    "go","rb","lua","sql","ps1","psm1","psd1","bat","cmd","exe","dll","msi","png","jpg","jpeg","gif",
+                    "webp","svg","pdf","doc","docx","xls","xlsx","ppt","pptx","tar","gz","7z","rar","whl","ipynb","patch","diff"}
+FILE_EXT_TLD     = {"md","py","sh","ps","pl","pm","rs","zip","mov","so","mk"}
+CLI_FETCHERS     = {"curl","wget","wget2","aria2c","http","https","xh"}   # 进程名去掉 .exe
+
+def filename_host(host, proc=""):
+    """host 像命令行里误当网址的文件名时返回 True（见上）。"""
+    if not is_domain(host): return False
+    ext=host.rsplit(".",1)[1].lower()
+    if ext in FILE_EXT_NOT_TLD: return True
+    p=proc.lower(); p=p[:-4] if p.endswith(".exe") else p
+    return ext in FILE_EXT_TLD and p in CLI_FETCHERS
+
 def parse_host(line):
     """取连接日志的目标 (host, port)；不是连接行返回 None。"""
     m=HOST_RE.search(line)
@@ -828,6 +848,8 @@ def classify_line(line, ts, pending, routed, dom_classified, ip_classified):
         if outp.upper()=="REJECT" and (not rule or rule.upper()=="MATCH"):
             if is_domain(host):
                 if domain_covered(host, dom_classified): return None, False
+                pm=PROC_RE.search(line)
+                if filename_host(host, pm.group(1) if pm else ""): return None, False
                 return "domain", _bump(pending["domains"], host, ts, port)
             if is_ip(host):
                 if skip_ip(host) or ip_covered(host, ip_classified): return None, False
