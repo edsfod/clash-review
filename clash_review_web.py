@@ -139,10 +139,14 @@ def _advice_brief(adv, kind, host):
             "list_verdict": a.get("list_verdict"), "prompt_hash": a.get("prompt_hash"), "model_name": a.get("model_name"), "checked": a.get("checked"),
             "model_error": a.get("model_error") or None}
 
-def _decision(kind, host, decision, snap, adv):
+def _decision(kind, host, decision, snap, adv, body=None):
+    """body：应用请求。其中 ai 是从网页 AI 导入的结论（{主机: 结论}），一并记下，评估时能分出照着网页 AI 选的。"""
     import datetime
-    return {"time": datetime.datetime.now().isoformat(timespec="seconds"), "kind": kind, "host": host, "decision": decision,
-            "snapshot": snap, "advice": _advice_brief(adv, kind, host)}
+    d = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "kind": kind, "host": host, "decision": decision,
+         "snapshot": snap, "advice": _advice_brief(adv, kind, host)}
+    ai = (body or {}).get("ai")
+    if isinstance(ai, dict) and isinstance(ai.get(host), str): d["web_ai"] = ai[host]
+    return d
 
 def api_pending_apply(ctx, body):
     targets = {c: [h for h in body.get(c, []) if isinstance(h, str)] for c in cr.CAT_ORDER}
@@ -153,7 +157,7 @@ def api_pending_apply(ctx, body):
         for h in hosts:
             r = p["domains"].get(h) or p["ips"].get(h) or {}
             snap = {"count": r.get("count"), "procs": sorted(r.get("procs") or []), "ctx": list(r.get("ctx") or []), "ports": sorted(r.get("ports") or [])}
-            log.append(_decision("pending", h, dec, snap, adv))
+            log.append(_decision("pending", h, dec, snap, adv, body))
     out, moved = cr.promote(ctx, targets) if any(targets.values()) else ([], [])
     notes = []
     if ignore:
@@ -202,7 +206,7 @@ def api_routed_apply(ctx, body):
             b = "proxy" if h in routed["proxy"] else "direct" if h in routed["direct"] else None
             r = routed[b][h] if b else {}
             snap = {"bucket": b, "count": r.get("count"), "sites": list(r.get("sites") or []), "ports": sorted(r.get("ports") or [])}
-            log.append(_decision(kind, h, "proxy" if dec == "keep" else dec, snap, adv))
+            log.append(_decision(kind, h, "proxy" if dec == "keep" else dec, snap, adv, body))
     notes = []
     if dr or rej:
         added, ns = cr.routed_classify(ctx, {c: hs for c, hs in (("direct", dr), ("reject", rej)) if hs})
@@ -224,16 +228,32 @@ def _set_of(ctx, name):
             if name == n: return kind, cat
     raise ApiError(f"未知规则集 {name}")
 
+def _policy_flags(sets):
+    """直连规则集里按现在的策略该保持代理的条目（cr.direct_exclusion，离线）：{条目: 原因}。
+    策略改了，以前写进直连的不会自己改回来（2026-10-01 发现 9-26 按旧提示词直连的 GitHub、证书状态服务还在），规则页标出来。
+    国内的域名（v2fly geolocation-cn）不标：登录类的国内站本来就该直连。"""
+    import external
+    for s in sets:
+        if s.get("cat") != "direct" or s.get("kind") != "domain": continue
+        flags = {}
+        for e in s["entries"]:
+            h = cr._dom_base(e); lk = external.lookup(h)
+            if lk and "geolocation-cn" in lk["categories"]: continue
+            why = cr.direct_exclusion(h, lk)
+            if why: flags[e] = why
+        s["flags"] = flags
+    return sets
+
 def api_rules(ctx, q):
     if ctx.dest:     # 规则在规则服务上：列出服务端能写的全部规则集，经写入接口直接改（见 docs/destinations.md）
-        return {"sets": cr.dest_editor(ctx), "dest": {"endpoint": ctx.dest.endpoint, "admin_url": ctx.dest.admin_url},
+        return {"sets": _policy_flags(cr.dest_editor(ctx)), "dest": {"endpoint": ctx.dest.endpoint, "admin_url": ctx.dest.admin_url},
                 "default": (ctx.dest.rulesets.get("domain") or {}).get("proxy")}     # 默认选中新条目写进去的代理规则集
     sets = []
     for kind in ("domain", "ip"):
         for cat in cr.CAT_ORDER:
             sets.append({"name": ctx.names[kind][cat], "kind": kind, "cat": cat,
                          "entries": cr.load_ruleset(ctx, kind, cat)})
-    return {"sets": sets}
+    return {"sets": _policy_flags(sets)}
 
 def api_rules_add(ctx, body):
     v = str(body.get("value", "")).strip()
@@ -376,15 +396,83 @@ def api_advice_run(ctx, body):
     threading.Thread(target=run, daemon=True).start()
     return {"job": jid, "total": len(items), "ctx_sent": single}
 
+# ---------------- 交给网页 AI：本页要判断的项连同策略复制出去，回复贴回来导入（只选中，不应用）----------------
+# 外层 Markdown（策略、回复格式、清单说明），清单本身是 JSON：模型照抄主机名、按字段读证据，都比读表格稳；回复也要求 JSON，程序好读。
+# 证据只读缓存，不联网。与问模型一样只给本机事实，不给名单结论（名单是另一层，各自独立）。
+# 不外发名单（no_send.txt）里的主机不导出，前后连接与最初出现时的站点按它过滤。
+EXPORT_MAX = 150
+EXPORT_KINDS = {"pending": "漏网待审（最终落到 MATCH,REJECT 被拒的连接）",
+                "suspicious": "地域放行「可疑」（被地域规则直接放行、排序程序认为可疑的主机）",
+                "todirect": "地域放行「可改直连」（现在走代理，国内解析到国内节点、直连实测比代理快）"}
+EXPORT_CHOICES = {"pending": "proxy（代理）、direct（直连）、reject（拉黑）、keep（不选，留在待审）、ignore（忽略：一次性噪声，不写规则）",
+                  "suspicious": "reject（拉黑）、ok（正常，不改规则）",
+                  "todirect": "direct（改直连）、proxy（保持代理）、reject（拉黑）"}
+
+def api_export(ctx, body):
+    import advisor, evidence
+    kind = body.get("kind")
+    if kind not in EXPORT_KINDS: raise ApiError("参数不对")
+    want = [h for h in body.get("hosts", []) if isinstance(h, str)]
+    if not want: raise ApiError("本页没有要判断的项")
+    no_send = advisor.load_no_send(); evs = evidence.snapshot(); T = cr.load_traffic(ctx)["hosts"]
+    payloads = {c: ctx.entries("domain", c) for c in ("proxy", "direct", "reject")}
+    sites = lambda hs, own: list(dict.fromkeys(s for h in hs if not advisor.blocked(h, no_send)
+                                               for s in [advisor._site(h)] if s != advisor._site(own)))
+    if kind == "pending":
+        p = cr.load_pending(ctx.pending); src = {**p["ips"], **p["domains"]}
+    elif kind == "suspicious":
+        src = {h: dict(rec, _b=b, _why=why) for h, b, sc, why, rec in cr.suggest_routed(ctx, include_reviewed=True)}
+    else:
+        src = cr.load_routed(ctx.routed)["proxy"]
+    items, skipped, gone = [], [], 0
+    for h in want:
+        if advisor.blocked(h, no_send): skipped.append(h); continue
+        r = src.get(h)
+        if not r: gone += 1; continue
+        if len(items) >= EXPORT_MAX: continue
+        it = {"host": h, "count": r.get("count")}
+        if kind == "pending":
+            if r.get("procs"): it["procs"] = sorted(r["procs"])
+            ctxs = sites(r.get("ctx") or [], h)[:6]
+            if ctxs: it["ctx_sites"] = ctxs
+            if cr.is_ip(h): it["ip_info"] = cr.enrich_ip(h, ip_table())
+        elif kind == "suspicious":
+            it["now"] = "直连（地域规则判为国内）" if r["_b"] == "direct" else "代理（地域规则判为境外）"
+            it["score_reasons"] = r["_why"]
+            ss = sites(r.get("sites") or [], h)
+            if ss: it["sites_nearby"] = ss
+        it["ports"] = sorted(r.get("ports") or [], key=lambda x: (len(x), x))
+        facts = []
+        if not cr.is_ip(h):
+            ev = evidence.collect(h, net=False, cache=evs)
+            if ev and kind == "todirect":
+                ev = dict(ev, speed=evidence.collect_speed(h, cr.speed_scheme(r.get("ports") or []), None, net=False, cache=evs))
+            facts += evidence.describe(ev)
+            ss = evidence.same_site(h, payloads)
+            if ss: facts.append("同站主机在规则集里的归类：" + "，".join(ss[:8]))
+        tl = cr.traffic_line(T.get(h))
+        if tl: facts.append(tl)
+        if facts: it["facts"] = facts
+        items.append(it)
+    if not items: raise ApiError("没有可以导出的项" + (f"（{len(skipped)} 项在不外发名单里）" if skipped else "（刷新后再试）"))
+    t = open(advisor.NOTES, encoding="utf-8").read()
+    text = (advisor._section(t, "提示词：背景与策略") + "\n\n## 回复格式\n\n" + advisor._section(t, "提示词：批量回复格式")
+            + f"\n\n## 清单：{EXPORT_KINDS[kind]}，{len(items)} 项\n\n结论从 {EXPORT_CHOICES[kind]} 中选。"
+            + "字段：count 累计连接次数，procs 发起进程，ctx_sites 前后连接里的站点，sites_nearby 最初出现时前后连接里的站点，"
+            + "score_reasons 排序程序的打分理由，facts 本机证据（国内视角解析、直连实测、流量、同站主机的归类）。\n\n"
+            + "```json\n" + json.dumps(items, ensure_ascii=False, indent=1) + "\n```\n")
+    return {"text": text, "count": len(items), "skipped": skipped, "gone": gone,
+            "truncated": max(0, len(want) - len(skipped) - gone - len(items)), "choices": advisor.CHOICES[kind]}
+
 # ---------------- 地域放行：代理改直连的候选（见 clash_review.direct_candidates）----------------
 # 两道关：
-#   1. 测速（直连与代理各测 3 次首字节，cr.direct_verdict）：直连连不上、不比代理快、国内解析不到的，隐藏，不问模型。
+#   1. 测速（直连与代理各测 3 次首字节，cr.direct_verdict）：国内解析不到、解析到境外节点的（不测速）、直连连不上、不比代理快的，隐藏，不问模型。
 #   2. 过了测速的，按提示词里的策略问模型（kind=todirect，结论 direct / proxy / reject），结果存 advice.json 的 todirect:主机。
 #      模型建议保持代理的也隐藏；列表只剩没测的、待问模型的、建议直连或拉黑的（含分歧），最多 TO_DIRECT_TOP 个。
 # 隐藏的连同原因一起返回，页面可展开查看。「实测」在后台跑，进度沿用 /api/advice/job 轮询。
 def _direct_row(ctx, h, rec, t, owner, ev, a, ph, ids=None):
     import advisor
-    gate, speed = cr.direct_verdict(ev)
+    gate, speed = cr.direct_verdict(ev, h)
     ident = advisor.identity_get(h, ids)
     ips = (ev or {}).get("cn_ips")
     adv = dict(a, stale=_stale(a, ph)) if a else None
@@ -448,10 +536,10 @@ def api_todirect_test(ctx, body):
         h, rec, _, _ = x
         try:
             ev = evidence.collect(h)
-            if ev and isinstance(ev.get("cn_ips"), list) and ev["cn_ips"]:   # 解析不到的不用测速
+            if ev and cr.direct_verdict(dict(ev, speed=None), h)[0] is None:   # 解析不到的、解析到境外节点的不用测速
                 ev = dict(ev, speed=evidence.collect_speed(h, cr.speed_scheme(rec["ports"]), proxy))
             a = _advice_load(ctx).get(f"todirect:{h}")
-            if cr.direct_verdict(ev)[0] == "direct" and (not a or a.get("model_error") or _stale(a, ph)):
+            if cr.direct_verdict(ev, h)[0] == "direct" and (not a or a.get("model_error") or _stale(a, ph)):
                 return models.submit(ask, x, ev)      # 测速过了、还没有有效结论的，交给问模型的线程池
             finish(x, ev, a)
         except Exception as e: fail(x, e)
@@ -476,7 +564,7 @@ GET = {"/api/status": api_status, "/api/pending": api_pending, "/api/suggest": a
        "/api/routed": api_routed, "/api/rules": api_rules, "/api/tidy": api_tidy,
        "/api/lists": api_lists, "/api/advice": api_advice, "/api/advice/job": api_advice_job,
        "/api/todirect": api_todirect, "/api/model": api_model}
-POST = {"/api/pending/apply": api_pending_apply, "/api/routed/apply": api_routed_apply, "/api/advice/run": api_advice_run, "/api/todirect/test": api_todirect_test,
+POST = {"/api/pending/apply": api_pending_apply, "/api/routed/apply": api_routed_apply, "/api/advice/run": api_advice_run, "/api/todirect/test": api_todirect_test, "/api/export": api_export,
         "/api/rules/add": api_rules_add, "/api/rules/delete": api_rules_delete,
         "/api/rules/move": api_rules_move, "/api/tidy/apply": api_tidy_apply, "/api/tidy/merge": api_tidy_merge,
         "/api/model/set": api_model_set, "/api/model/login": api_model_login}

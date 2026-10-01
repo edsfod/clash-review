@@ -166,19 +166,29 @@ async function loadPage() {
 }
 // 按下鼠标到松开之间不重画：重画会把按钮换成新元素，按下与松开落在两个元素上，浏览器就不算一次点击。
 // 查询进行中每 1.5 秒重画一次，「应用」常被这样吞掉（2026-09-26）。松开后再补画，排在这次点击之后。
-let pointerDown = false, renderLater = false;
+// 重画也会把搜索框换成新元素：焦点与光标随旧元素丢掉，后面按的键落到页面上（数字键还会触发归类快捷键）。
+// 查询、实测进行中每 1.5 秒重画一次，搜索框因此打不进字（2026-10-01）。重画后把焦点与光标还给同 id 的新输入框；
+// 输入法组字期间不重画（重画会打断组字），组字结束后补画。
+let pointerDown = false, composing = false, renderLater = false;
+const flushRender = () => { if (renderLater && !pointerDown && !composing) { renderLater = false; setTimeout(render, 0); } };
 document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
-const pointerRelease = () => { pointerDown = false; if (renderLater) { renderLater = false; setTimeout(render, 0); } };
+const pointerRelease = () => { pointerDown = false; flushRender(); };
 document.addEventListener('pointerup', pointerRelease, true);
 document.addEventListener('pointercancel', pointerRelease, true);
+document.addEventListener('compositionstart', () => { composing = true; }, true);
+document.addEventListener('compositionend', () => { composing = false; flushRender(); }, true);
 function render() {
-  if (pointerDown) { renderLater = true; return; }
+  if (pointerDown || composing) { renderLater = true; return; }
   const old = document.querySelector('#page .list');
   const top = old ? old.scrollTop : 0;
+  const a = document.activeElement;
+  const keep = a && a.id && $('page').contains(a) && 'selectionStart' in a ? { id: a.id, s: a.selectionStart, e: a.selectionEnd } : null;
   const html = S.page === 'pending' ? pendingHTML() : S.page === 'routed' ? routedHTML() : rulesHTML();
   $('page').innerHTML = html;
   const list = document.querySelector('#page .list');
   if (list) list.scrollTop = top;
+  const el = keep && $(keep.id);
+  if (el) { el.focus({ preventScroll: true }); try { el.setSelectionRange(keep.s, keep.e); } catch (e) { /* 不支持选区的输入框 */ } }
 }
 function renderList() {   // 只换列表，不动页头（搜索框保持焦点）
   const list = document.querySelector('#page .list');
@@ -214,6 +224,7 @@ function kbdHint(parts) {
 // 外发规则：单行「理由」会把前后连接（站点名）发给模型；「为本页全部生成」不发。
 const ADV_CN = { reject: '拉黑', direct: '直连', proxy: '代理', keep: '不选', ignore: '忽略', ok: '正常' };
 const A = { lists: {}, listsMissing: false, adv: { pending: {}, suspicious: {}, todirect: {} }, busy: { pending: {}, suspicious: {}, todirect: {} },
+  ai: { pending: {}, suspicious: {}, todirect: {} },
   open: { pending: {}, suspicious: {}, todirect: {} }, gen: { pending: null, suspicious: null, todirect: null } };
 async function loadLists(hosts) {
   const need = hosts.filter((h) => !(h in A.lists));
@@ -306,6 +317,79 @@ function genHTML(kind, n) {
   return `<button class="btn btn-ghost btn-sm" data-act="gen" data-kind="${kind}" ${todo ? '' : 'disabled'} title="对本页还没查过的项查三层证据并问模型；不发前后连接">为本页生成${todo ? `（${todo} 项未查）` : ''}</button>`;
 }
 
+// ---------------- 交给网页 AI（导出本页、导入回复；见 clash_review_web 的 api_export 与 prompt.md「批量回复格式」）----------------
+// 导出本页还没选的项（都选过了就导出全部），连同策略与回复格式，复制去问网页版 AI；回复贴回来，读最后一个 json 代码块，
+// 只替你选中，不应用。导入的结论记在 A.ai，行内标「网页 AI：…」（悬停看理由），应用时随请求记进裁定日志。
+// 「可改直连」只导出过了实测的项（国内节点、直连更快）：没过实测的直连不了，没必要问。
+const AI_KIND = () => (S.page === 'pending' ? 'pending' : S.routed.view === 'sus' ? 'suspicious' : 'todirect');
+function aiHosts(kind) {
+  if (kind === 'pending') {
+    const all = pendingItems().map((i) => i.host); const open = all.filter((h) => !S.pending.choice[h]);
+    return open.length ? open : all;
+  }
+  const rows = routedRows().filter((r) => kind !== 'todirect' || r.state === 'shown' || r.state === 'ask');
+  const open = rows.filter((r) => !S.routed.mark[r.host]).map((r) => r.host);
+  return open.length ? open : rows.map((r) => r.host);
+}
+function aiBtn() {
+  return '<button class="btn btn-ghost btn-sm" data-act="ai-open" title="把本页还没选的项连同判断策略复制出去，问网页版 AI；把它的回复贴回来，导入为选择">网页 AI</button>';
+}
+async function aiOpen() {
+  const kind = AI_KIND(); const hosts = aiHosts(kind);
+  if (!hosts.length) { toast(kind === 'todirect' ? '本页还没有过了实测的项：先点「实测」，国内节点、直连更快的才值得问' : '本页没有要判断的项'); return; }
+  const d = await api('/api/export', { kind, hosts });
+  S.ai = { kind, view: S.page === 'routed' ? S.routed.view : '', data: d, copied: false, note: null };
+  renderAI(); $('ai').showModal();
+}
+function renderAI() {
+  const X = S.ai; const d = X.data;
+  const skip = [d.skipped.length && `${d.skipped.length} 项在不外发名单里，没有导出`, d.truncated && `超过 ${d.count} 项的部分没有导出，导入后再导出下一批`,
+    d.gone && `${d.gone} 项已不在清单里`].filter(Boolean).join('；');
+  const n = X.note;
+  $('ai-body').innerHTML = `<h3>1. 复制清单</h3>
+    <p>本页${X.kind === 'todirect' ? '过了实测、' : ''}还没选的 ${d.count} 项，连同判断策略与回复格式（取自工具目录的 prompt.md）。含发起进程、前后连接的站点名与本机证据，不含名单的结论；贴到网页版 AI（ChatGPT、Claude 等）即可。${skip ? `<br><span class="warn">${esc(skip)}</span>` : ''}</p>
+    <div class="step"><button class="btn btn-primary" data-act="ai-copy">复制 ${d.count} 项</button>${X.copied ? '<span class="ok">已复制，去网页 AI 粘贴</span>' : ''}</div>
+    <details><summary class="muted">查看要复制的内容（${fmtN(d.text.length)} 字）</summary><pre>${esc(d.text)}</pre></details>
+    <h3>2. 粘贴回复</h3>
+    <p>把网页 AI 的整段回复贴进来，程序读最后一个 json 代码块。导入只替你选中，不会应用：核对后在底部点「应用」。</p>
+    <textarea class="fld" id="ai-in" placeholder="粘贴网页 AI 的回复" spellcheck="false"></textarea>
+    <div class="step"><button class="btn" data-act="ai-import">导入</button>${n ? `<span class="${n.warn ? 'warn' : 'ok'}">${esc(n.t)}</span>` : ''}</div>`;
+}
+function aiParse(text) {
+  const blocks = [...text.matchAll(/```[a-zA-Z]*\s*\n([\s\S]*?)```/g)].map((m) => m[1]).reverse();   // 最后一个代码块优先
+  const i = text.indexOf('['); const j = text.lastIndexOf(']');
+  if (i >= 0 && j > i) blocks.push(text.slice(i, j + 1));                                          // 没有代码块时取最外层的方括号
+  for (const b of blocks) { try { const v = JSON.parse(b); if (Array.isArray(v)) return v; } catch (e) { /* 试下一个 */ } }
+  throw new Error('回复里找不到 JSON 数组：应是最后一个 ```json 代码块');
+}
+function aiImport() {
+  const X = S.ai; const kind = X.kind;
+  if (kind !== AI_KIND() || (X.view && X.view !== S.routed.view)) throw new Error('已经换了页面或视图，关掉重新打开');
+  const arr = aiParse($('ai-in').value);
+  const onPage = new Set(kind === 'pending' ? pendingItems().map((i) => i.host) : routedRows().map((r) => r.host));
+  const allowed = X.data.choices; const cnt = {}; let away = 0, bad = 0;
+  arr.forEach((o) => {
+    const h = String(o?.host || '').trim().toLowerCase(); const c = String(o?.choice || '').trim().toLowerCase();
+    if (!h || !allowed.includes(c)) { bad += 1; return; }
+    if (!onPage.has(h)) { away += 1; return; }
+    A.ai[kind][h] = { choice: c, reason: String(o.reason || '') };
+    if (kind === 'pending') { if (c === 'keep') delete S.pending.choice[h]; else S.pending.choice[h] = c; }
+    else { S.routed.mark[h] = c === 'proxy' ? 'keep' : c; S.routed.markView[h] = S.routed.view; }
+    cnt[c] = (cnt[c] || 0) + 1;
+  });
+  const got = Object.entries(cnt).map(([c, k]) => `${ADV_CN[c] || c} ${k}`).join(' · ');
+  const miss = X.data.count - Object.values(cnt).reduce((a, b) => a + b, 0);
+  X.note = { warn: !got || away || bad || miss > 0,
+    t: `${got ? `已选中：${got}` : '没有导入任何项'}${miss > 0 ? `；${miss} 项回复里没有` : ''}${away ? `；${away} 项不在本页` : ''}${bad ? `；${bad} 项结论无效` : ''}` };
+  renderAI(); render();
+}
+function aiTag(kind, h) {
+  const x = A.ai[kind][h]; if (!x) return '';
+  const label = kind === 'todirect' && x.choice === 'proxy' ? '保持代理' : ADV_CN[x.choice] || x.choice;
+  return `<span class="tag ai" title="${esc(x.reason)}">网页 AI：${esc(label)}</span>`;
+}
+const aiChoices = (kindOf) => (hosts) => Object.fromEntries(hosts.map((h) => [h, A.ai[kindOf(h)]?.[h]?.choice]).filter(([, c]) => c));
+
 // ---------------- 待审 ----------------
 async function loadPending() {
   const P = S.pending;
@@ -351,7 +435,7 @@ function pendingHTML() {
     }
   }
   return `<div class="phead"><h1>漏网待审</h1>${helpBtn()}<span class="muted" style="font-size:13px">最终落到 MATCH,REJECT 的连接 · 同一次访问带出的归在一起</span>
-      <span class="grow"></span>${genHTML('pending', pendingItems().length)}${kbdHint([['↑ ↓', '选择'], ['1', '代理'], ['2', '直连'], ['3', '拉黑'], ['4', '忽略'], ['0', '撤销'], ['Space', '展开上下文'], ['?', '理由']])}</div>
+      <span class="grow"></span>${pendingItems().length ? aiBtn() : ''}${genHTML('pending', pendingItems().length)}${kbdHint([['↑ ↓', '选择'], ['1', '代理'], ['2', '直连'], ['3', '拉黑'], ['4', '忽略'], ['0', '撤销'], ['Space', '展开上下文'], ['?', '理由']])}</div>
     <div class="list">${body}</div>
     ${resultHTML(P.result, 'pending')}
     <div class="bar"><span>已选 <b class="mono">${c.chosen}</b> 项</span>
@@ -372,7 +456,7 @@ function inboxRowHTML(it, same) {
   const acts = KINDS.map(([k, l, key]) => `<button class="act${cur === k ? ' on-' + k : ''}" data-act="p-pick" data-h="${esc(it.host)}" data-k="${k}"><span class="k">${key}</span>${l}</button>`).join('');
   return `<div class="row r-inbox${focus ? ' focus' : ''}" data-act="p-focus" data-h="${esc(it.host)}">
     <div class="acts" role="group" aria-label="归类">${acts}</div>
-    <div style="min-width:0"><div class="host">${esc(it.host)}${whyBtn('pending', it.host)}</div><div class="sub">${advTags('pending', it.host)}${bits.join(' · ')}</div>
+    <div style="min-width:0"><div class="host">${esc(it.host)}${whyBtn('pending', it.host)}</div><div class="sub">${aiTag('pending', it.host)}${advTags('pending', it.host)}${bits.join(' · ')}</div>
       ${open ? `<div class="chips">${it.ctx.map((h) => `<span class="chip${same.has(h) ? ' hit' : ''}">${esc(h)}</span>`).join('')}</div>` : ''}
       ${A.open.pending[it.host] ? whyHTML('pending', it.host) : ''}</div>
     <span class="meta">${fmtN(it.count)} 次</span><span class="meta dim">${esc(it.last.slice(5, 16))}</span></div>`;
@@ -393,6 +477,7 @@ async function pendingApply() {
   if (!c.chosen || P.applying) return;
   const body = { proxy: [], direct: [], reject: [], ignore: [] };
   Object.entries(P.choice).forEach(([h, k]) => body[k].push(h));
+  body.ai = aiChoices(() => 'pending')(Object.keys(P.choice));
   P.applying = true; render();       // 写规则服务要联网，要几秒：期间按钮显示「提交中…」，防止重复提交
   let r;
   try { r = await api('/api/pending/apply', body); } finally { P.applying = false; render(); }
@@ -487,7 +572,7 @@ function routedHTML() {
   return `<div class="phead"><h1>地域放行</h1>${helpBtn()}
       <div class="seg" role="group" aria-label="视图">${views.map(([k, l, n]) => `<button class="${R.view === k ? 'on' : ''}" data-act="r-view" data-k="${k}">${l} <span class="n">${n == null ? '' : fmtN(n)}</span></button>`).join('')}</div>
       <span class="muted" style="font-size:13px">${hint}</span>
-      <span class="grow"></span>${R.view === 'sus' ? genHTML('suspicious', routedRows().length) : dir ? dirGenHTML() : ''}${kbdHint(keys)}
+      <span class="grow"></span>${R.view === 'sus' || dir ? aiBtn() : ''}${R.view === 'sus' ? genHTML('suspicious', routedRows().length) : dir ? dirGenHTML() : ''}${kbdHint(keys)}
       <input class="fld" style="width:260px" type="search" placeholder="搜索主机" aria-label="搜索主机" id="r-q" value="${esc(R.q)}"></div>
     <div class="list">${routedRowsHTML()}</div>
     ${resultHTML(R.result, 'routed')}
@@ -511,7 +596,7 @@ function routedRowsHTML() {
     return `<div class="row r-routed${R.focus === r.host ? ' focus' : ''}" data-act="r-focus" data-h="${esc(r.host)}">
       <div class="acts" role="group" aria-label="处理">${acts}</div>
       <div style="min-width:0"><div class="host">${esc(r.host)}${sus ? whyBtn('suspicious', r.host) : ''}</div>
-        <div class="sub">${sus ? advTags('suspicious', r.host) : ''}${esc(sub)}${own ? ' · ' + own : ''}</div>
+        <div class="sub">${sus ? aiTag('suspicious', r.host) + advTags('suspicious', r.host) : ''}${esc(sub)}${own ? ' · ' + own : ''}</div>
         ${sus && A.open.suspicious[r.host] ? whyHTML('suspicious', r.host) : ''}</div>
       <span class="meta" style="font-weight:600;color:${sus && r.score >= 4.5 ? 'var(--copper)' : 'var(--ink2)'}">${sus ? r.score.toFixed(1) : ''}</span>
       <span class="meta" style="text-align:center;color:${r.bucket === 'proxy' ? 'var(--teal)' : 'var(--ink2)'}">${r.bucket === 'proxy' ? '代理' : '直连'}</span>
@@ -548,7 +633,7 @@ function dirRowsHTML() {
     return `<div class="row r-routed${R.focus === r.host ? ' focus' : ''}${hidden ? ' dim' : ''}" data-act="r-focus" data-h="${esc(r.host)}">
       <div class="acts" role="group" aria-label="处理">${btn('direct', '2', '直连', 'on-direct')}${btn('keep', '0', '保持代理', 'on-ok')}${btn('reject', '3', '拉黑', 'on-reject')}</div>
       <div style="min-width:0" title="${esc(detail)}"><div class="host">${esc(r.host)}${a ? whyBtn('todirect', r.host) : ''}<span class="what">${esc(what)}</span></div>
-        <div class="sub">${tag}${esc(line)}</div>
+        <div class="sub">${aiTag('todirect', r.host)}${tag}${esc(line)}</div>
         ${A.open.todirect[r.host] ? whyHTML('todirect', r.host) : ''}</div>
       <span class="meta"></span>
       <span class="meta" style="text-align:center;color:var(--teal)">代理</span>
@@ -565,6 +650,7 @@ async function routedApply() {
   const R = S.routed; const body = { reject: [], ok: [], direct: [], keep: [], views: { ...R.markView } };   // views：裁定日志按视图区分可疑 / 可改直连
   Object.entries(R.mark).forEach(([h, k]) => body[k].push(h));
   if (!Object.values(body).some((x) => x.length) || R.applying) return;
+  body.ai = aiChoices((h) => (R.markView[h] === 'sus' ? 'suspicious' : 'todirect'))(Object.keys(R.mark));
   R.applying = true; render();
   let r;
   try { r = await api('/api/routed/apply', body); } finally { R.applying = false; render(); }
@@ -615,7 +701,9 @@ function rulesHTML() {
   const seg = U.dest ? (U.dest.admin_url ? `<a class="link" href="${esc(U.dest.admin_url)}" target="_blank" rel="noreferrer" style="font-size:13px">管理页</a>` : '')
     : `<div class="seg" role="group" aria-label="视图"><button class="${U.view === 'entries' ? 'on' : ''}" data-act="u-view" data-k="entries">条目</button>
         <button class="${U.view === 'audit' ? 'on' : ''}" data-act="u-view" data-k="audit">体检 <span class="n" style="color:${n ? 'var(--amber)' : 'var(--teal)'}">${n}</span></button></div>`;
+  const nflag = Object.keys(cur.flags || {}).length;
   const head = `<div class="phead"><h1 class="mono">${esc(cur.name)}</h1>${helpBtn()}<span class="muted" style="font-size:13px">${setLabel(cur)} · ${cur.entries.length} 条</span>
+      ${nflag ? `<button class="link" style="font-size:13px;color:var(--amber)" data-act="u-flagged" title="条目旁写了原因；用「移到代理」改回。点一下只看这些，再点一下看全部">${U.flagOnly ? '看全部（' : ''}${nflag} 条按现在的策略应代理${U.flagOnly ? '）' : ''}</button>` : ''}
       ${seg}<span class="grow"></span>${U.view === 'entries' ? `<input class="fld" style="width:240px" type="search" placeholder="搜索全部规则集" aria-label="搜索全部规则集" id="u-q" value="${esc(U.q)}">` : ''}</div>`;
   let body;
   if (U.view === 'entries') {
@@ -639,9 +727,9 @@ function entriesHTML() {
   const q = U.q.trim().toLowerCase();
   // 有搜索词时搜全部规则集，每条标出所在的规则集；没有时只列当前规则集
   const rows = q ? U.sets.flatMap((s) => s.entries.filter((v) => v.toLowerCase().includes(q)).map((v) => [s, v]))
-    : cur.entries.map((v) => [cur, v]);
+    : cur.entries.filter((v) => !(U.flagOnly && Object.keys(cur.flags || {}).length) || cur.flags[v]).map((v) => [cur, v]);   // 标记的都改完了就回到全部
   if (!rows.length) return `<div class="empty">${q ? '全部规则集里都没有匹配的条目。' : '这个规则集是空的。'}</div>`;
-  return rows.slice(0, 500).map(([s, v]) => `<div class="row r-entry"><span class="host">${esc(v)}${q ? ` <span class="muted" style="font-size:12.5px">${esc(s.name)} · ${setLabel(s)}</span>` : ''}</span><span style="display:flex;gap:2px">
+  return rows.slice(0, 500).map(([s, v]) => `<div class="row r-entry"><span class="host">${esc(v)}${q ? ` <span class="muted" style="font-size:12.5px">${esc(s.name)} · ${setLabel(s)}</span>` : ''}${s.flags?.[v] ? `<span class="flag">应代理：${esc(s.flags[v])}</span>` : ''}</span><span style="display:flex;gap:2px">
       ${moveTargets(s).map((m) => `<button class="link" data-act="u-move" data-set="${esc(s.name)}" data-h="${esc(v)}" data-k="${esc(m.to)}" data-label="${esc(m.label)}">${esc(m.label)}</button>`).join('')}
       <button class="link link-del" data-act="u-del" data-set="${esc(s.name)}" data-h="${esc(v)}">删除</button></span></div>`).join('')
     + (rows.length > 500 ? `<div class="empty">还有 ${rows.length - 500} 条没显示，用搜索缩小范围。</div>` : '');
@@ -688,6 +776,8 @@ const HELP = {
 <dt>次数 · 时间</dt><dd>累计被拒次数，最近一次被拒的时间。</dd></dl>
 <h3>原理</h3>
 <p>watch 经 Clash 内核的命名管道订阅实时日志，挑出最终命中 <code>MATCH,REJECT</code> 的连接，每 200 条连接日志写一次盘。已经被规则集覆盖的主机不会再进来：这六个之外，Clash 配置里按网址取的规则集（<code>type: http</code>，读本地缓存）也算。</p>
+<h3>网页 AI</h3>
+<p>页头「网页 AI」把本页还没选的项（最多 150 项）连同判断策略与回复格式复制出去，贴给网页版 AI；它的回复贴回来，点「导入」替你选中，行内标「网页 AI：…」，鼠标停上去看理由。导入不会应用，核对后照常点「应用」。复制的内容含发起进程、前后连接的站点名与本机证据，不外发名单里的主机不导出。</p>
 <h3>主机名像文件名？</h3>
 <p>像 <code>INDEX.md</code> 这种，多半是命令行把文件名当成了网址去连（例如没加引号的 <code>*</code> 被展开成文件列表）。<code>.md</code> 是真实存在的域名后缀（摩尔多瓦），工具没法按后缀排除。这类条目用「忽略」清掉。</p>` },
   routed: { title: '地域放行：这页是做什么的', html: `
@@ -696,7 +786,7 @@ const HELP = {
 <p>广告、统计、追踪也会混在里面一起被放行。这页把它们列出来，找出该拉黑的。</p>
 <h3>五个视图</h3>
 <dl><dt>可疑</dt><dd>给每个主机打分，3 分及以上的按分数排列，第二行是得分理由。</dd>
-<dt>可改直连</dt><dd>走代理、但直连可能更好的主机（微软、苹果、Steam 的下载 CDN、证书吊销检查等），直连更快也省代理流量。候选按流量与次数排，去掉登录/账号类、AI 服务、同站你已归到代理的、拦截名单收录的。点「实测」过两道关：先直连与走代理各测 3 次首字节，直连连不上或不比代理快的隐藏；过了的再按策略问模型该不该直连——涉及登录、支付、个人数据或有地区限制的，按地区下发内容的（Google、微软的账号、商店、授权等）与被它们唤起、要同一出口的组件，常被干扰的（Google、GitHub、pages.dev 等），明文会暴露访问对象的境外证书状态服务，都保持代理；学术出版商默认直连（校园网按 IP 认证），投稿审稿平台代理；出口 IP 探测、来历可疑的证书站点、第三方镜像加速站之类照样拉黑。策略全文见工具目录的 prompt.md。模型建议保持代理的也隐藏，页头可展开。「直连」写入 {{direct}}，「拉黑」写入 {{reject}}，「保持代理」记下来以后不再列出；测速与模型结论一直缓存，直到重新查询。</dd>
+<dt>可改直连</dt><dd>走代理、但直连可能更好的主机（微软、苹果、Steam 的下载 CDN 等），直连更快也省代理流量。按策略不论快慢都该代理的不进候选：登录与账号类、Google、GitHub、<code>pages.dev</code> / <code>workers.dev</code>、境外证书状态服务、AI 服务、境外社交媒体与新闻、流媒体与娱乐（游戏下载除外）、Bing；另去掉同站你已归到代理的、拦截名单收录的、标过「保持代理」的。点「实测」过三道关：国内 DNS 解析到的必须是国内节点（解析到 Fastly、Cloudflare 之类的境外地址，直连只是绕到境外，今天通、明天可能被干扰；学术出版商例外，学校按出口 IP 认证）；再直连与走代理各测 3 次首字节，直连连不上或不比代理快的隐藏；过了的再按策略问模型该不该直连——涉及登录、支付、个人数据或有地区限制的，被境外服务唤起、要同一出口的组件，保持代理；学术出版商默认直连，投稿审稿平台代理；出口 IP 探测、来历可疑的证书站点、第三方镜像加速站之类照样拉黑。策略全文见工具目录的 prompt.md。模型建议保持代理的也隐藏，页头可展开。「直连」写入 {{direct}}，「拉黑」写入 {{reject}}，「保持代理」记下来以后不再列出；测速与模型结论一直缓存，直到重新查询。</dd>
 <dt>全部 · 直连 · 代理</dt><dd>原始清单，按连接次数排序，最多列 300 条，用搜索缩小范围。</dd></dl>
 <h3>分数怎么来</h3>
 <dl><dt>关键词</dt><dd>主机名含 analytics、telemetry、track、sentry、cnzz 等，或整段是 ad、stats、rum、metrics 等，3 分；log、event、sdk 等有歧义的弱关键词 1.5 分。</dd>
@@ -705,6 +795,8 @@ const HELP = {
 <dt>跨站出现</dt><dd>这个主机最初 40 次出现时，前后跟着很多个不同网站（典型的第三方追踪），最多 1.5 分，单靠它到不了 3 分。</dd>
 <dt>子域像随机串</dt><dd>如 <code>o1158394</code>，1.5 分。</dd></dl>
 <p>分数只决定排序，不会自动拉黑。</p>
+<h3>网页 AI</h3>
+<p>「可疑」「可改直连」两个视图的页头有「网页 AI」：把本页还没选的项连同判断策略复制出去，问网页版 AI，回复贴回来导入为选择（不会应用）。「可改直连」只导出过了实测的项。</p>
 <h3>两个操作</h3>
 <dl><dt>拉黑</dt><dd>写入 <code>{{reject}}</code>，并从本清单移除。重新激活后生效。</dd>
 <dt>正常</dt><dd>记入「看过」名单，以后不再出现在「可疑」里（「全部」里仍有）。不改任何规则。</dd></dl>
@@ -713,6 +805,8 @@ const HELP = {
   rules: { title: '规则：这页是做什么的', html: `
 <h3>配了规则服务时</h3>
 <p>左栏是规则服务上能写的全部规则集，这台电脑的 Clash 用到的排在前面。搜索框搜全部规则集；改类、换层、删除直接提交到规则服务（写入密钥只在本机后台用），上线后自动让 Clash 重新取，一般一两分钟。期间别处（如管理页）改过同一个规则集会提示，重新操作一次即可。冗余、重叠由规则服务在写入时提示，没有体检页。下面讲的是没配规则服务时的六个收件箱。</p>
+<h3>应代理</h3>
+<p>直连规则集里，按现在的策略不论快慢都该代理的条目（Google、GitHub、境外证书状态服务、AI、境外社交媒体与新闻、流媒体、Bing、登录类等，按 v2fly 分类离线判断），旁边标「应代理」和原因，页头有条数。策略改过以后，以前写进直连的条目不会自己改回来；用「移到代理」改回，或删除（删除后交回地域规则，境外的走代理）。</p>
 <h3>六个规则集</h3>
 <p><code>{{reject}}</code>（拉黑）、<code>{{direct}}</code>（直连）、<code>{{proxy}}</code>（代理），各分域名版和 IP 版，名字取自 Clash 配置。待审和地域放行里的归类，最终都写进这里；这页可以直接增删改。</p>
 <p>Clash 配置里另有按网址取的规则集（<code>type: http</code>）时，它们只读：判断「是否已覆盖」、写入时的重叠提示和体检都会算上它们（读本地缓存），但这里不列出，也不会写入。</p>
@@ -742,7 +836,7 @@ let qTimer = 0;
 document.addEventListener('input', (e) => {
   if (e.target.id === 'r-q') {
     S.routed.q = e.target.value;
-    if (S.routed.view === 'sus') renderList();
+    if (S.routed.view === 'sus' || S.routed.view === 'dir') renderList();     // 这两个视图在本页过滤，不用重新取
     else { clearTimeout(qTimer); qTimer = setTimeout(() => guard(async () => { S.routed.list = await api('/api/routed?' + new URLSearchParams({ bucket: S.routed.view, q: S.routed.q, limit: '300' })); renderList(); }), 200); }
   } else if (e.target.id === 'u-q') { S.rules.q = e.target.value; renderList(); }
   else if (e.target.id === 'u-new') S.rules.draft = e.target.value;
@@ -767,6 +861,10 @@ document.addEventListener('click', (e) => {
   if (a === 'help') { $('help-title').textContent = HELP[S.page].title; $('help-body').innerHTML = fillNames(HELP[S.page].html); $('help').showModal(); }
   else if (a === 'help-close') $('help').close();
   else if (a === 'model') guard(openModel);
+  else if (a === 'ai-open') guard(aiOpen);
+  else if (a === 'ai-close') $('ai').close();
+  else if (a === 'ai-copy') guard(async () => { await navigator.clipboard.writeText(S.ai.data.text); S.ai.copied = true; renderAI(); });
+  else if (a === 'ai-import') guard(async () => aiImport());
   else if (a === 'model-close') $('model').close();
   else if (a === 'model-login') guard(modelLogin);
   else if (a === 'model-save') guard(modelSave);
@@ -796,7 +894,8 @@ document.addEventListener('click', (e) => {
   else if (a === 'r-clear') { R.mark = {}; R.markView = {}; render(); }
   else if (a === 'r-apply') guard(routedApply);
   else if (a === 'close-result') { S[k].result = []; render(); }
-  else if (a === 'u-sel') { U.sel = k; U.q = ''; U.undo = null; U.result = []; render(); }
+  else if (a === 'u-sel') { U.sel = k; U.q = ''; U.undo = null; U.result = []; U.flagOnly = false; render(); }
+  else if (a === 'u-flagged') { U.flagOnly = !U.flagOnly; render(); }
   else if (a === 'u-view') { U.view = k; render(); }
   else if (a === 'u-del') guard(async () => {
     const set = el.dataset.set || U.sel;       // 搜索全部规则集时，每一行属于自己的规则集
@@ -845,7 +944,7 @@ function toggleWhy(kind, h) {
 
 // 键盘：只在焦点不在输入框时生效
 document.addEventListener('keydown', (e) => {
-  if ($('help').open || $('model').open) return;
+  if ($('help').open || $('model').open || $('ai').open) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (e.ctrlKey && e.key === 'Enter') {
     if (S.page === 'pending') { e.preventDefault(); guard(pendingApply); }

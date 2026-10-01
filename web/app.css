@@ -183,3 +183,12 @@ dialog.help code { font-family: var(--mono); font-size: 12px; color: var(--ink);
 #model .msub.mgrid { display: grid; grid-template-columns: max-content 1fr; }
 #model .warn { color: var(--amber); }
 .status button.st { background: none; border: 0; font: inherit; cursor: pointer; padding: 0; }
+/* 网页 AI：导入的结论标在行内；对话框里的预览与粘贴框 */
+.tag.ai { color: var(--teal); border-color: var(--teal); }
+.flag { margin-left: 8px; font-family: var(--sans); font-size: 12.5px; color: var(--amber); }
+#ai .step { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+#ai pre { max-height: 240px; overflow: auto; margin: 6px 0 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--sheet); font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+#ai textarea.fld { width: 100%; height: 160px; padding: 8px 10px; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+#ai .ok { color: var(--teal); }
+#ai .warn { color: var(--amber); }

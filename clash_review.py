@@ -1037,9 +1037,55 @@ def suggest_routed(ctx, routed=None, include_reviewed=False):
 # Clash 的 direct-nameserver 也是 223.5.5.5 / 1.12.12.12，所以实测解析到的就是改直连后实际会连的节点。
 # 推荐规则：在它实际用的端口上，直连与走代理各测 3 次首字节取中位数（evidence.speed），直连 ≤ 代理 × FASTER 才推荐直连。
 # 测完不值得改的（直连连不上、不比代理快）不再列出，名额由后面的候选补上；7 天后缓存过期会重测。只作提示，不替你选。
+#
+# 2026-10-01 加两道确定的关，不再全靠模型挡（之前 Google、GitHub、证书状态服务都进了候选，www.google.com 也列着「未实测」；
+# 9-26 按旧提示词被推荐、应用成直连的有 GitHub、证书状态服务、Twitch 等，裁定评估里模型与人工只有 46% 一致）：
+#   1. 离线（direct_exclusion）：提示词「背景与策略」前三个依据里能按名单认定的——Google、GitHub、pages.dev / workers.dev、
+#      证书状态服务、AI 服务、境外社交媒体与新闻、流媒体与娱乐（游戏下载除外）、Bing——不论快慢都保持代理，不进候选。
+#   2. 实测后（direct_verdict）：国内解析到的必须是国内节点（IP→ASN 的国家为 CN）。解析到境外节点的（如 Fastly、Cloudflare 的美国地址），
+#      直连只是绕到境外，今天通、明天可能被干扰，保持代理。学术出版商（v2fly category-scholar-!cn）例外：学校订阅按出口 IP 认证，要直连。
 TO_DIRECT_TOP = 60
 FASTER = 0.8          # 留两成余量，免得测量抖动把差不多的也推荐成直连
 LOGIN_KW = {"login","logon","signin","signup","account","accounts","auth","oauth","sso","passport","identity","id","myaccount"}
+STAY_PROXY_OWNERS = {"google": "Google 的主机常被干扰", "bing": "Bing 按出口地区下发内容"}
+STAY_PROXY_CATS = {"category-ai-!cn": "AI 服务有地区限制",
+                   "category-cas": "境外证书状态服务：请求是明文，会暴露在访问哪个网站",
+                   "category-social-media-!cn": "境外社交媒体常被封锁",
+                   "category-media": "境外新闻媒体常被封锁"}
+STAY_PROXY_SUFFIX = {"pages.dev": "pages.dev 常被干扰", "workers.dev": "workers.dev 常被干扰",
+                     # GitHub 按提示词列的域名认，不按 v2fly 的 github 清单：那份清单还收了 npm 等 GitHub 旗下、但不常被干扰的服务
+                     **{d: "GitHub 常被干扰" for d in ("github.com", "githubusercontent.com", "githubassets.com", "github.io",
+                                                       "githubstatus.com", "githubcopilot.com", "github.dev")}}
+CERT_HOST_RE = re.compile(r"(^|\.)(ocsp|crls?|crt|cacerts|aia)[0-9]*(-[0-9a-z-]*)?\.")   # ocsp2.、crl3.、ocsp-ev.；不含 ocspexample.
+
+def direct_exclusion(host, lk=None):
+    """按策略不论线路都该保持代理的，返回原因；否则 None。lk：external.lookup 的结果，不给就现查（离线）。"""
+    import external
+    h = host.lower().strip(".")
+    if set(_tokens(h)) & LOGIN_KW: return "登录与账号类：改直连会换出口地区，可能触发验证"
+    for sfx, why in STAY_PROXY_SUFFIX.items():
+        if h == sfx or h.endswith("." + sfx): return why
+    if CERT_HOST_RE.search(h): return STAY_PROXY_CATS["category-cas"]
+    lk = lk if lk is not None else external.lookup(h)
+    if not lk: return None
+    for o, why in STAY_PROXY_OWNERS.items():
+        if o in lk["owner"]: return why
+    for c, why in STAY_PROXY_CATS.items():
+        if c in lk["categories"]: return why
+    if "category-entertainment" in lk["categories"] and "category-games-!cn" not in lk["categories"] and not lk.get("cn_attr"):
+        return "流媒体与娱乐常被封锁或有地区限制"
+    return None
+
+def is_scholar(host, lk=None):
+    import external
+    lk = lk if lk is not None else external.lookup(host)
+    return bool(lk) and "category-scholar-!cn" in lk["categories"]
+
+def _cn_cc(ev):
+    """国内解析到的地址所在国家。旧缓存没有 cn_cc 时从 cn_asn 的「（AS…，CC）」里取。"""
+    cc = ev.get("cn_cc")
+    if cc is None: cc = sorted({m.group(1) for a in ev.get("cn_asn") or [] for m in [re.search(r"，([A-Z]{2})）$", a)] if m})
+    return cc
 
 def keepproxy_path(ctx): return os.path.join(ctx.review, "routed_keepproxy.txt")
 
@@ -1057,12 +1103,17 @@ def speed_scheme(ports):
     ports={str(p) for p in ports}
     return "http" if "80" in ports and "443" not in ports else "https"
 
-def direct_verdict(ev):
-    """(推荐, 理由)。推荐为 direct / keep；没测过为 (None, ...)。ev 为证据缓存的一项（含 speed）。"""
+def direct_verdict(ev, host=None):
+    """(推荐, 理由)。推荐为 direct / keep；没测过为 (None, ...)。ev 为证据缓存的一项（含 speed）。
+    给了 host 时另查是否学术出版商：它们不要求国内节点。"""
     if not ev: return None, "还没实测"
     ips=ev.get("cn_ips")
     if ips=="NXDOMAIN": return "keep", "国内 DNS 解析不到"
     if not isinstance(ips, list) or not ips: return "keep", "国内 DNS 解析没有结果"
+    cc=_cn_cc(ev)
+    if cc!=["CN"] and not (host and is_scholar(host)):
+        where="、".join(a.split("（")[0] for a in (ev.get("cn_asn") or [])[:2]) or "归属未知"
+        return "keep", f"国内解析到的不是国内节点（{where}，{'/'.join(cc) or '国家未知'}）"
     s=ev.get("speed")
     if not s: return None, "还没实测"
     d, p = s["direct_ms"], s["proxy_ms"]
@@ -1084,9 +1135,10 @@ def direct_candidates(ctx, routed=None, top=None):
     proxied={site_of(_dom_base(p)) for p in ctx.entries("domain", "proxy")}
     T=load_traffic(ctx)["hosts"]; out=[]
     for h, rec in routed["proxy"].items():
-        if is_ip(h) or h in keep or set(_tokens(h)) & LOGIN_KW or site_of(h) in proxied: continue
+        if is_ip(h) or h in keep or site_of(h) in proxied: continue
         lk=external.lookup(h)
-        if lk and (external.verdict(lk)=="reject" or "category-ai-!cn" in lk["categories"]): continue
+        if lk and external.verdict(lk)=="reject": continue
+        if direct_exclusion(h, lk): continue
         t=T.get(h) or {}
         score=math.log10(t.get("up", 0)+t.get("down", 0)+1)+math.log10(rec["count"]+1)
         out.append((score, h, rec, t, (lk or {}).get("owner", [])[:3]))

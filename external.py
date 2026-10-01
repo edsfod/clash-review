@@ -144,7 +144,8 @@ def lookup(host):
     cats = sorted(n for n in allnames if n.startswith("category-") or n.startswith("geolocation-"))
     owners = sorted(n for n in allnames if not (n.startswith("category-") or n.startswith("geolocation-")))
     ads_attr = any("ads" in a for _, a, _ in direct) or any(n.startswith("category-ads") for n in allnames)
-    return {"block": block, "owner": owners, "categories": cats, "ads_attr": ads_attr,
+    cn_attr = any("cn" in a for _, a, _ in direct)          # 条目标了 @cn：v2fly 认定它在中国大陆有节点、可以直连
+    return {"block": block, "owner": owners, "categories": cats, "ads_attr": ads_attr, "cn_attr": cn_attr,
             "v2fly_match": sorted({f"{n}:{s}" for n, _, s in direct})}
 
 def verdict(lk):
