@@ -83,7 +83,7 @@ function renderStatus() {
   const tip = [...(d.log || []), '', DISPLAY.text].join('\n');
   const dec = d.decisions;
   if (dec && dec.due) out.push(`<span class="st muted" title="上次评估后新增 ${dec.new} 条人工裁定（累计 ${dec.total} 条）。在工具目录运行 python eval_decisions.py，比对模型推荐与你的决定">有 ${dec.new} 条新裁定可评估</span>`);
-  if (d.model) out.push(`<button class="st ${d.model.problem ? 'warn' : 'muted'}" data-act="model" title="问哪个模型：点开可换">${d.model.problem ? '<span class="dot"></span>' : ''}模型 ${esc(d.model.model || d.model.name)}${d.model.problem ? ' · ' + esc(d.model.problem) : ''}</button>`);
+  if (d.model) out.push(`<button class="st ${d.model.problem ? 'warn' : 'muted'}" data-act="model" title="问哪个模型：点开可换">${d.model.problem ? '<span class="dot"></span>' : ''}${d.model.provider === 'none' ? '不用模型' : '模型 ' + esc(d.model.model || d.model.name)}${d.model.problem ? ' · ' + esc(d.model.problem) : ''}</button>`);
   out.push(`<span class="st muted opt" title="${esc(tip)}">上次采集 ${m ? m[2] : '—'}${d.core ? ` · 内核 ${esc(d.core.version)}` : ''}</span>`);
   $('status').innerHTML = out.join('');
   $('n-pending').textContent = d.pending.domains + d.pending.ips;
@@ -95,10 +95,12 @@ $('status').addEventListener('click', (e) => {
 
 // ---------------- 模型选择（存 settings.json 的 model，见 advisor「各家接口」）----------------
 const modelLabel = () => (S.status && S.status.model ? S.status.model.name : '模型');
+const modelOn = () => !(S.status && S.status.model && S.status.model.provider === 'none');   // 「不用模型」：不出现问模型的按钮
 const MODEL_SRC = {
   codex: ['Codex', 'ChatGPT 订阅，不另付费，占订阅额度；每项约 20～30 秒'],
   claude: ['Claude', 'Claude 订阅（本机 claude -p），不另付费，占订阅额度'],
   openai: ['OpenAI 兼容接口', '按用量付费：DeepSeek、OpenAI、Gemini 等，填接口地址、模型名与密钥文件'],
+  none: ['不用模型', '只看本机证据、实测与名单，自己判断，或用「网页 AI」交给网页版 AI'],
 };
 async function openModel() {
   const d = await api('/api/model'); const c = d.conf;
@@ -126,7 +128,8 @@ function renderModel() {
     <div class="msub mgrid"><span>接口地址</span><input class="fld" data-mf="base_url" placeholder="https://api.deepseek.com" value="${esc(f.base_url)}">
       <span>模型名</span><input class="fld" data-mf="model_api" placeholder="deepseek-flash" value="${esc(f.model_api)}">
       <span>密钥文件</span><input class="fld" data-mf="key_file" placeholder="C:/path/to/api-key.txt（只填文件路径，不填密钥本身）" value="${esc(f.key_file)}"></div>
-    <p class="muted">现在用的：${esc(d.name)}。换了模型，已有的推荐标「已过期」，「为本页生成」时重查。</p>
+    ${radio('none')}
+    <p class="muted">现在用的：${esc(d.name === 'none' ? '不用模型' : d.name)}。换了模型，已有的推荐标「已过期」，「为本页生成」时重查；选「不用模型」时以前的推荐照常显示。</p>
     <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" data-act="model-close">取消</button><button class="btn btn-primary" data-act="model-save">保存</button></div>`;
 }
 async function modelLogin() {
@@ -142,6 +145,7 @@ async function modelSave() {
   const f = S.model.form;
   const body = f.provider === 'codex' ? { provider: 'codex', model: f.model_codex, effort: f.effort }
     : f.provider === 'claude' ? { provider: 'claude', model: f.model_claude }
+    : f.provider === 'none' ? { provider: 'none' }
     : { provider: 'openai', base_url: f.base_url, model: f.model_api, key_file: f.key_file };
   const r = await api('/api/model/set', body);
   $('model').close(); toast(`已改用 ${r.name}`);
@@ -298,7 +302,7 @@ function whyHTML(kind, h) {
       <div>归属与功能：${esc(m.function)}</div><div>触发场景：${esc(m.trigger)}</div><div>推荐理由：${esc(m.reason)}</div>
       ${m.block_impact ? `<div>拉黑影响：${esc(m.block_impact)}</div>` : ''}
       <div class="opt">${opts.map((o, i) => `<span class="${i === 0 ? 'top' : ''}">${ADV_CN[o.choice]}</span><span class="c">${o.confidence}</span><span>${esc(o.reason)}</span>`).join('')}</div>`;
-  } else model = `<div class="err">${esc(a.model_error || '没有模型结论')}</div>`;
+  } else model = a.model_name === 'none' ? '<div class="muted">没问模型（模型设置里选了「不用模型」）</div>' : `<div class="err">${esc(a.model_error || '没有模型结论')}</div>`;
   return `<div class="why"><span class="lh">汇总</span><div class="ln">${esc(a.why)}${a.split ? '　由你决定' : ''}</div>
     <span class="lh">本机</span><div>${lines(a.layer1)}</div>
     <span class="lh">资料</span><div>${lines(a.layer3)}</div>
@@ -307,10 +311,13 @@ function whyHTML(kind, h) {
       <button class="link" data-act="why-run" data-kind="${kind}" data-h="${esc(h)}">重新查询</button></div></div>`;
 }
 function genTodo(kind) {   // 「为本页生成」只查还没查过的；上次模型出错（如余额不足）或已过期（提示词改过、超过 30 天）的算没查过
-  const hosts = kind === 'pending' ? pendingItems().map((i) => i.host) : routedRows().map((r) => r.host);
+  const hosts = kind === 'pending' ? pendingItems().map((i) => i.host)
+    : kind === 'todirect' ? routedRows().filter((r) => r.state === 'ask').map((r) => r.host)   // 只问过了实测的
+    : routedRows().map((r) => r.host);
   return hosts.filter((h) => { const a = A.adv[kind][h]; return !A.busy[kind][h] && (!a || a.model_error || a.stale); });
 }
 function genHTML(kind, n) {
+  if (!modelOn()) return '';
   const g = A.gen[kind];
   if (g) return `<span class="gen">生成中 ${g.done} / ${g.total}</span>`;
   const todo = n ? genTodo(kind).length : 0;
@@ -337,7 +344,7 @@ function aiBtn() {
 }
 async function aiOpen() {
   const kind = AI_KIND(); const hosts = aiHosts(kind);
-  if (!hosts.length) { toast(kind === 'todirect' ? '本页还没有过了实测的项：先点「实测」，国内节点、直连更快的才值得问' : '本页没有要判断的项'); return; }
+  if (!hosts.length) { toast(kind === 'todirect' ? '本页还没有过了实测的项（国内节点、直连更快的才值得问）；实测在进入本页时自动进行' : '本页没有要判断的项'); return; }
   const d = await api('/api/export', { kind, hosts });
   S.ai = { kind, view: S.page === 'routed' ? S.routed.view : '', data: d, copied: false, note: null };
   renderAI(); $('ai').showModal();
@@ -497,6 +504,7 @@ async function loadRouted() {
   } else if (R.view === 'dir') {
     const [dir, tot] = await Promise.all([api('/api/todirect'), api('/api/routed?limit=1')]);
     R.dir = dir; R.totals = tot.totals; dirSyncAdvice();
+    if (!R.dirGen) { const todo = dirTodo(); if (todo.length) guard(() => dirTest(todo)); }   // 进页面自动实测没测过的
   } else {
     R.list = await api('/api/routed?' + new URLSearchParams({ bucket: R.view, q: R.q, limit: '300' }));
     R.totals = R.list.totals;
@@ -513,8 +521,9 @@ function routedRows() {
   return R.list?.rows || [];
 }
 // ---------------- 可改直连（走代理、在国内可能有节点的主机；见 clash_review_web 的「代理改直连的候选」）----------------
-// 两道关：测速（直连连不上或不比代理快的隐藏）→ 按策略问模型（建议保持代理的隐藏）。隐藏的可在页头展开。
-// 排序：建议直连 → 建议拉黑 → 分歧 → 待问模型 → 没实测；同组内保持后端的流量与次数顺序。
+// 实测（国内节点一关 + 测速；直连连不上或不比代理快的隐藏）在进入本页时自动对没测过的项进行，不问模型。
+// 问模型是另一步：「为本页生成」只问过了实测的（建议保持代理的隐藏）；模型设置选「不用模型」时没有这一步。隐藏的可在页头展开。
+// 排序：建议直连 → 建议拉黑 → 分歧 → 过了实测、没有模型结论 → 没实测；同组内保持后端的流量与次数顺序。
 function dirRank(r) {
   const a = r.advice;
   if (r.state === 'shown') return a.split ? 2 : a.recommend === 'direct' ? 0 : 1;
@@ -528,10 +537,14 @@ function dirSyncAdvice() {   // 理由面板读 A.adv.todirect
   const R = S.routed;
   [...(R.dir?.rows || []), ...(R.dir?.hidden || [])].forEach((r) => { if (r.advice) A.adv.todirect[r.host] = r.advice; else delete A.adv.todirect[r.host]; });
 }
-function dirTodo() { const R = S.routed; return (R.dir?.rows || []).filter((r) => (r.state === 'untested' || r.state === 'ask') && !R.dirBusy[r.host]).map((r) => r.host); }
+function dirTodo() {   // 没实测的；本次打开页面已经测过（出错仍是未实测）的不再自动重测，免得反复
+  const R = S.routed; R.dirTried = R.dirTried || {};
+  return (R.dir?.rows || []).filter((r) => r.state === 'untested' && !R.dirBusy[r.host] && !R.dirTried[r.host]).map((r) => r.host);
+}
 async function dirTest(hosts) {
   const R = S.routed;
   if (!hosts.length) return;
+  hosts.forEach((h) => { R.dirTried[h] = true; });
   const r = await api('/api/todirect/test', { hosts });
   hosts.forEach((h) => { R.dirBusy[h] = true; }); R.dirGen = { done: 0, total: r.total }; render();
   for (;;) {
@@ -553,11 +566,9 @@ async function dirTest(hosts) {
 }
 function dirGenHTML() {
   const R = S.routed; const g = R.dirGen; const nh = R.dir?.hidden?.length || 0;
-  const hid = nh ? `<button class="btn btn-ghost btn-sm" data-act="d-hidden" title="直连连不上、不比代理快、国内解析不到的，以及模型建议保持代理的">${R.dirShowHidden ? '收起' : '显示'}已隐藏的 ${nh} 项</button>` : '';
-  if (g) return `${hid}<span class="gen">实测中 ${g.done} / ${g.total}</span>`;
-  const n = dirTodo().length;
-  if (!n) return `${hid}<button class="btn btn-ghost btn-sm" disabled title="测速与模型结论一直缓存，直到重新查询">本页已全部查过</button>`;
-  return `${hid}<button class="btn btn-ghost btn-sm" data-act="d-test" title="直连与走代理各测 3 次首字节；过了测速的按策略问模型">实测（${n} 项）</button>`;
+  const hid = nh ? `<button class="btn btn-ghost btn-sm" data-act="d-hidden" title="直连连不上、不比代理快、国内解析不是国内节点的，以及模型建议保持代理的">${R.dirShowHidden ? '收起' : '显示'}已隐藏的 ${nh} 项</button>` : '';
+  if (g) return `${hid}<span class="gen" title="直连与走代理各测 3 次首字节；不问模型">实测中 ${g.done} / ${g.total}</span>`;
+  return hid + genHTML('todirect', routedRows().filter((r) => r.state === 'ask' || r.state === 'shown').length);
 }
 function routedHTML() {
   const R = S.routed; const t = R.totals;
@@ -620,7 +631,7 @@ function dirRowsHTML() {
     const m = R.mark[r.host]; const a = r.advice; const hidden = r.state === 'hidden';
     const tag = R.dirBusy[r.host] ? '<span class="tag busy">查询中…</span>'
       : r.state === 'untested' ? '<span class="tag busy">未实测</span>'
-      : r.state === 'ask' ? '<span class="tag busy">待问模型</span>'
+      : r.state === 'ask' ? (modelOn() ? '<span class="tag busy" title="国内节点、直连更快；「为本页生成」问模型">待问模型</span>' : '<span class="tag rec" title="国内节点、直连更快">过了实测</span>')
       : hidden ? '<span class="tag">已隐藏</span>'
       : a.split ? `<span class="tag split" title="${esc(a.why)}">分歧</span>`
       : `<span class="tag rec">推荐 ${a.recommend === 'direct' ? '直连' : '拉黑'}</span>`;
@@ -633,7 +644,7 @@ function dirRowsHTML() {
     const btn = (k, key, label, on) => `<button class="act${m === k ? ' ' + on : ''}" data-act="r-mark" data-h="${esc(r.host)}" data-k="${k}"><span class="k">${key}</span>${label}</button>`;
     return `<div class="row r-routed${R.focus === r.host ? ' focus' : ''}${hidden ? ' dim' : ''}" data-act="r-focus" data-h="${esc(r.host)}">
       <div class="acts" role="group" aria-label="处理">${btn('direct', '2', '直连', 'on-direct')}${btn('keep', '0', '保持代理', 'on-ok')}${btn('reject', '3', '拉黑', 'on-reject')}</div>
-      <div style="min-width:0" title="${esc(detail)}"><div class="host">${esc(r.host)}${a ? whyBtn('todirect', r.host) : ''}<span class="what">${esc(what)}</span></div>
+      <div style="min-width:0" title="${esc(detail)}"><div class="host">${esc(r.host)}${a || r.state !== 'untested' ? whyBtn('todirect', r.host) : ''}<span class="what">${esc(what)}</span></div>
         <div class="sub">${aiTag('todirect', r.host)}${tag}${esc(line)}</div>
         ${A.open.todirect[r.host] ? whyHTML('todirect', r.host) : ''}</div>
       <span class="meta"></span>
@@ -787,7 +798,7 @@ const HELP = {
 <p>广告、统计、追踪也会混在里面一起被放行。这页把它们列出来，找出该拉黑的。</p>
 <h3>五个视图</h3>
 <dl><dt>可疑</dt><dd>给每个主机打分，3 分及以上的按分数排列，第二行是得分理由。</dd>
-<dt>可改直连</dt><dd>走代理、但直连可能更好的主机（微软、苹果、Steam 的下载 CDN 等），直连更快也省代理流量。按策略不论快慢都该代理的不进候选：登录与账号类、Google、GitHub、<code>pages.dev</code> / <code>workers.dev</code>、境外证书状态服务、AI 服务、境外社交媒体与新闻、流媒体与娱乐（游戏下载除外）、Bing；另去掉同站你已归到代理的、拦截名单收录的、标过「保持代理」的。点「实测」过三道关：国内 DNS 解析到的必须是国内节点（解析到 Fastly、Cloudflare 之类的境外地址，直连只是绕到境外，今天通、明天可能被干扰；学术出版商例外，学校按出口 IP 认证）；再直连与走代理各测 3 次首字节，直连连不上或不比代理快的隐藏；过了的再按策略问模型该不该直连——涉及登录、支付、个人数据或有地区限制的，被境外服务唤起、要同一出口的组件，保持代理；学术出版商默认直连，投稿审稿平台代理；出口 IP 探测、来历可疑的证书站点、第三方镜像加速站之类照样拉黑。策略全文见工具目录的 prompt.md。模型建议保持代理的也隐藏，页头可展开。「直连」写入 {{direct}}，「拉黑」写入 {{reject}}，「保持代理」记下来以后不再列出；测速与模型结论一直缓存，直到重新查询。</dd>
+<dt>可改直连</dt><dd>走代理、但直连可能更好的主机（微软、苹果、Steam 的下载 CDN 等），直连更快也省代理流量。按策略不论快慢都该代理的不进候选：登录与账号类、Google、GitHub、<code>pages.dev</code> / <code>workers.dev</code>、境外证书状态服务、AI 服务、境外社交媒体与新闻、流媒体与娱乐（游戏下载除外）、Bing；另去掉同站你已归到代理的、拦截名单收录的、标过「保持代理」的。打开本页时自动实测没测过的项，过两道关：国内 DNS 解析到的必须是国内节点（解析到 Fastly、Cloudflare 之类的境外地址，直连只是绕到境外，今天通、明天可能被干扰；学术出版商例外，学校按出口 IP 认证）；再直连与走代理各测 3 次首字节，直连连不上或不比代理快的隐藏。实测不问模型；过了的可点「为本页生成」按策略问模型该不该直连（模型设置里选「不用模型」就没有这一步，自己判断或交给网页 AI）——涉及登录、支付、个人数据或有地区限制的，被境外服务唤起、要同一出口的组件，保持代理；学术出版商默认直连，投稿审稿平台代理；出口 IP 探测、来历可疑的证书站点、第三方镜像加速站之类照样拉黑。策略全文见工具目录的 prompt.md。模型建议保持代理的也隐藏，页头可展开。「直连」写入 {{direct}}，「拉黑」写入 {{reject}}，「保持代理」记下来以后不再列出；测速与模型结论一直缓存，直到重新查询。</dd>
 <dt>全部 · 直连 · 代理</dt><dd>原始清单，按连接次数排序，最多列 300 条，用搜索缩小范围。</dd></dl>
 <h3>分数怎么来</h3>
 <dl><dt>关键词</dt><dd>主机名含 analytics、telemetry、track、sentry、cnzz 等，或整段是 ad、stats、rum、metrics 等，3 分；log、event、sdk 等有歧义的弱关键词 1.5 分。</dd>
@@ -886,10 +897,6 @@ document.addEventListener('click', (e) => {
   else if (a === 'p-apply') guard(pendingApply);
   else if (a === 'r-view') { R.view = k; R.focus = null; R.list = null; render(); guard(loadRouted); }
   else if (a === 'r-mark') routedMark(h, k);
-  else if (a === 'd-test') {
-    const hosts = dirTodo();
-    if (hosts.length && confirm(`实测 ${hosts.length} 项：直连与走代理各测 3 次首字节时间。\n\n直连可用且更快的，再按策略问模型（${modelLabel()}）该不该直连：发送主机名、连接次数、国内解析与测速结果，不发前后连接。每项十几到几十秒。`)) guard(() => dirTest(hosts));
-  }
   else if (a === 'd-hidden') { R.dirShowHidden = !R.dirShowHidden; render(); }
   else if (a === 'r-focus') { R.focus = h; render(); }
   else if (a === 'r-clear') { R.mark = {}; R.markView = {}; render(); }

@@ -99,6 +99,8 @@ def api_model_set(ctx, body):
     elif p == "claude":
         if s("model") not in ("haiku", "sonnet"): raise ApiError("Claude 模型只能选 haiku 或 sonnet")
         conf = {"provider": "claude", "model": s("model")}
+    elif p == "none":
+        conf = {"provider": "none"}
     elif p == "openai":
         if not s("base_url").startswith(("https://", "http://")): raise ApiError("接口地址要以 https:// 开头")
         if not s("model"): raise ApiError("缺模型名")
@@ -336,8 +338,9 @@ def api_lists(ctx, q):
 
 def _stale(a, ph):
     """推荐理由是否过期（规则见 advisor「缓存规则」）：看提示词改没改过、模型换没换过，不按时间过期。
-    ph：advisor.advice_version() 的 (提示词指纹, 模型名)。返回原因或空字符串。"""
+    ph：advisor.advice_version() 的 (提示词指纹, 模型名)。返回原因或空字符串。不用模型时以前的推荐照常参考。"""
     if a.get("prompt_hash") != ph[0]: return "提示词改过"
+    if ph[1] == "none": return ""
     return "" if (a.get("model_name") or advisor_old_model()) == ph[1] else "换了模型"
 
 def advisor_old_model(): return "openai:deepseek-flash"      # 1.4.0 之前的推荐没记模型名，都是 DeepSeek 给的
@@ -371,8 +374,9 @@ def _todirect_item(ctx, host):
 
 def api_advice_run(ctx, body):
     """body：{kind: pending|suspicious|todirect, hosts: [...]}。一项时算「单行理由」，把前后连接发给模型；多项时不发。"""
-    import layers
+    import layers, advisor
     kind = body.get("kind"); hosts = [h for h in body.get("hosts", []) if isinstance(h, str)][:300]
+    ask = advisor.model_enabled()          # 不用模型：只查本机证据与名单
     make = {"pending": _pending_item, "suspicious": _suspicious_item, "todirect": _todirect_item}.get(kind)
     if not make or not hosts: raise ApiError("参数不对")
     items = [it for it in (make(ctx, h) for h in hosts) if it]
@@ -383,7 +387,7 @@ def api_advice_run(ctx, body):
     payloads = {c: ctx.entries("domain", c) for c in ("proxy", "direct", "reject")}
     def one(it):
         try:
-            r = layers.explain_item(it, ctx, payloads, model=True, include_ctx=single)
+            r = layers.explain_item(it, ctx, payloads, model=ask, include_ctx=single)
             _advice_save(ctx, kind, it["host"], r)
             job["results"][it["host"]] = dict(r, stale="")
         except Exception as e:
@@ -478,7 +482,7 @@ def _direct_row(ctx, h, rec, t, owner, ev, a, ph, ids=None):
     adv = dict(a, stale=_stale(a, ph)) if a else None
     if gate is None: state, why = "untested", "还没实测"
     elif gate == "keep": state, why = "hidden", speed
-    elif not adv or adv.get("model_error") or adv["stale"]: state, why = "ask", (adv or {}).get("model_error") or speed
+    elif not adv or not adv.get("model") or adv["stale"]: state, why = "ask", (adv or {}).get("model_error") or speed   # 过了实测、还没有模型结论
     elif adv["recommend"] == "proxy" and not adv["split"]: state, why = "hidden", "模型建议保持代理"
     else: state, why = "shown", speed
     return {"host": h, "count": rec["count"], "ports": sorted(rec["ports"], key=lambda p: (len(p), p)),
@@ -506,49 +510,31 @@ def api_todirect(ctx, q):
     return {"rows": rows, "hidden": hidden, "kept": len(cr.load_keepproxy(ctx)), "top": cr.TO_DIRECT_TOP}
 
 def api_todirect_test(ctx, body):
-    """对每项：本机证据 → 测速 → 过了测速且还没有有效的模型结论，按策略问模型。"""
-    import evidence, advisor, layers
+    """实测：对每项查本机证据（国内解析）→ 过了国内节点一关的测速。只测不问模型：问模型是另一步（「为本页生成」，
+    走 api_advice_run），不用模型时就到此为止。页面打开「可改直连」时自动对没实测的项调用。"""
+    import evidence, advisor
     want = {h for h in body.get("hosts", []) if isinstance(h, str)}
     items = [x for x in cr.direct_candidates(ctx) if x[0] in want]
     if not items: raise ApiError("这些主机已不在候选里（刷新后再试）")
-    proxy = cr.mixed_port_url(ctx); ph = advisor.advice_version()
-    payloads = {c: ctx.entries("domain", c) for c in ("proxy", "direct", "reject")}
+    proxy = cr.mixed_port_url(ctx); ph = advisor.advice_version(); adv = _advice_load(ctx)
     jid = uuid.uuid4().hex[:12]
     job = {"total": len(items), "done": 0, "results": {}, "errors": {}, "running": True}
     _JOBS[jid] = job
-    # 两段流水线：测速与问模型分开两个线程池。原先同一个线程里「测速 → 问模型」串着做，模型一答几十秒，
-    # 占着 6 个测速线程，下一项的测速也开不了（2026-09-26：60 项跑了好几分钟）。
-    lock = threading.Lock()                                  # 两个线程池都会记结果
-    def finish(x, ev, a):
+    lock = threading.Lock()
+    def measure(x):
         h, rec, t, own = x
-        row = _direct_row(ctx, h, rec, t, own, ev, a, ph)
-        with lock: job["results"][h] = row; job["done"] += 1
-    def fail(x, e):
-        with lock: job["errors"][x[0]] = f"{type(e).__name__}: {e}"; job["done"] += 1
-    def ask(x, ev):
-        h, rec, _, _ = x
-        try:
-            a = layers.explain_item({"kind": "todirect", "host": h, "count": rec["count"]}, ctx, payloads, model=True)
-            _advice_save(ctx, "todirect", h, a)
-            finish(x, ev, a)
-        except Exception as e: fail(x, e)
-    def measure(x, models):
-        h, rec, _, _ = x
         try:
             ev = evidence.collect(h)
             if ev and cr.direct_verdict(dict(ev, speed=None), h)[0] is None:   # 解析不到的、解析到境外节点的不用测速
                 ev = dict(ev, speed=evidence.collect_speed(h, cr.speed_scheme(rec["ports"]), proxy))
-            a = _advice_load(ctx).get(f"todirect:{h}")
-            if cr.direct_verdict(ev, h)[0] == "direct" and (not a or a.get("model_error") or _stale(a, ph)):
-                return models.submit(ask, x, ev)      # 测速过了、还没有有效结论的，交给问模型的线程池
-            finish(x, ev, a)
-        except Exception as e: fail(x, e)
+            row = _direct_row(ctx, h, rec, t, own, ev, adv.get(f"todirect:{h}"), ph)
+            with lock: job["results"][h] = row; job["done"] += 1
+        except Exception as e:
+            with lock: job["errors"][h] = f"{type(e).__name__}: {e}"; job["done"] += 1
     def run():
         import concurrent.futures as cf
         try:
-            with cf.ThreadPoolExecutor(12) as models:        # 问模型只是等回话，不占带宽，多开几个
-                with cf.ThreadPoolExecutor(6) as speeds:     # 测速要准，别开太多并发挤占带宽
-                    list(speeds.map(lambda x: measure(x, models), items))
+            with cf.ThreadPoolExecutor(6) as ex: list(ex.map(measure, items))   # 测速要准，别开太多并发挤占带宽
         finally:
             job["running"] = False
     threading.Thread(target=run, daemon=True).start()

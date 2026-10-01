@@ -46,6 +46,16 @@ class Settings(unittest.TestCase):
         with self.assertRaises(web.ApiError):
             web.api_model_set(None, {"provider": "openai", "base_url": "https://x", "model": "m", "key_file": "C:/nope/key.txt"})
 
+    def test_no_model(self):
+        self.assertEqual(web.api_model_set(None, {"provider": "none"}), {"name": "none"})
+        self.assertFalse(advisor.model_enabled())
+        with self.assertRaises(RuntimeError): advisor.resolve()
+        self.assertEqual(web._stale({"prompt_hash": "p1", "model_name": "codex:gpt-6-sol"}, ("p1", "none")), "")   # 以前的推荐照常参考
+        self.assertEqual(web._stale({"prompt_hash": "p0", "model_name": "none"}, ("p1", "none")), "提示词改过")
+        self.assertEqual(web._stale({"prompt_hash": "p1", "model_name": "none"}, ("p1", "codex:gpt-6-sol")), "换了模型")
+        web.api_model_set(None, {"provider": "codex"})
+        self.assertTrue(advisor.model_enabled())
+
     def test_stale(self):
         ph = ("p1", "codex:gpt-6-sol")
         self.assertEqual(web._stale({"prompt_hash": "p0", "model_name": "codex:gpt-6-sol"}, ph), "提示词改过")

@@ -161,7 +161,7 @@ DEFAULT_MODEL = {"provider": "codex", "model": "gpt-6-sol", "effort": "low"}
 
 def model_conf():
     m = cr.settings().get("model")
-    if not isinstance(m, dict) or m.get("provider") not in ("codex", "claude", "openai"):
+    if not isinstance(m, dict) or m.get("provider") not in ("codex", "claude", "openai", "none"):
         if cr.settings().get("deepseek_key_file") and m is None:      # 1.4.0 之前的设置：只写了 DeepSeek 密钥
             return {"provider": "openai", "base_url": "https://api.deepseek.com", "model": "deepseek-flash",
                     "key_file": cr.settings()["deepseek_key_file"]}
@@ -169,9 +169,14 @@ def model_conf():
     return m
 
 def model_name(conf=None):
-    """记在推荐与身份缓存里的模型名，如 codex:gpt-6-sol。换了模型，旧推荐标「已过期」。"""
+    """记在推荐与身份缓存里的模型名，如 codex:gpt-6-sol。换了模型，旧推荐标「已过期」。不用模型时为 none。"""
     c = conf or model_conf()
+    if c["provider"] == "none": return "none"
     return f"{c['provider']}:{c.get('model') or DEFAULT_MODEL['model']}"
+
+def model_enabled():
+    """模型设置里选了「不用模型」时为 False：网页只查本机证据与名单，不问模型（可交给网页 AI）。"""
+    return model_conf()["provider"] != "none"
 
 def _read_key(path, what):
     try:
@@ -312,6 +317,7 @@ def resolve(provider=None):
         fam = "claude" if provider.startswith("claude") else "codex" if provider.startswith("codex") else "api"
         return PROVIDERS[provider], fam, provider
     c = model_conf(); name = model_name(c); p = c["provider"]
+    if p == "none": raise RuntimeError("模型设置里选了「不用模型」")
     if p == "codex":
         return (lambda s, u, t, sc=None: _codex(c.get("model") or DEFAULT_MODEL["model"], c.get("effort") or "low", s, u, t, sc)), "codex", name
     if p == "claude":

@@ -121,6 +121,9 @@ def explain_item(item, ctx, payloads, model=True, include_ctx=False, remember=Tr
             out["model"] = {k: x.get(k) for k in ("decision", "votes", "owner", "owner_basis", "function", "trigger", "reason",
                                                    "confidence", "scope", "block_impact", "options")}
         else: out["model_error"] = r.get("error", "")
+    else:                                            # 不问模型（选了「不用模型」）：只有本机证据与名单，换回模型时按「换了模型」重查
+        import advisor
+        out["prompt_hash"] = advisor.prompt_hash(); out["model_name"] = "none"
     rec, why, split = combine(md, l3["verdict"], kind)
     if kind == "suspicious" and rec in ("direct", "proxy"): rec = "ok"
     out.update(recommend=rec, why=why, split=split)

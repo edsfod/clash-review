@@ -193,13 +193,13 @@ mihomo 内核日志流（命名管道 /logs）→ watch 提取 MATCH→REJECT �
 
 `geolocation-!cn` 按域名归属分，不看在国内能不能直连。微软、苹果、Steam 的下载 CDN、Office 更新、证书吊销检查等在国内有节点，直连更快也省代理流量；反过来「国内判给直连、想改走代理」很少，一般是网页打不开才发现，到「规则」页手动加即可，所以只做这一个方向。
 
-网页「地域放行 → 可改直连」的候选（`clash_review.direct_candidates`）：走代理的域名，去掉按策略不论快慢都该代理的（`clash_review.direct_exclusion`，离线按 v2fly 分类与域名判断：登录/账号类、Google、GitHub、`pages.dev` / `workers.dev`、境外证书状态服务、`category-ai-!cn`、境外社交媒体与新闻、流媒体与娱乐（游戏下载与标了 `@cn` 的除外）、Bing），以及同站已人工归到代理的、拦截名单收录的、标过「保持代理」的（`var/routed_keepproxy.txt`），按流量与次数排。「实测」过三道关：
+网页「地域放行 → 可改直连」的候选（`clash_review.direct_candidates`）：走代理的域名，去掉按策略不论快慢都该代理的（`clash_review.direct_exclusion`，离线按 v2fly 分类与域名判断：登录/账号类、Google、GitHub、`pages.dev` / `workers.dev`、境外证书状态服务、`category-ai-!cn`、境外社交媒体与新闻、流媒体与娱乐（游戏下载与标了 `@cn` 的除外）、Bing），以及同站已人工归到代理的、拦截名单收录的、标过「保持代理」的（`var/routed_keepproxy.txt`），按流量与次数排。打开这一页时自动对本页没测过的项实测（前两关），不问模型；问模型是另一步：
 
 1. **国内节点**（`clash_review.direct_verdict`）：国内 DoH 解析到的地址，按 IP→ASN 数据集的国家必须全是 CN，否则隐藏，不测速。解析到 Fastly、Cloudflare、Akamai 之类的境外地址时，直连只是自己绕到境外：今天通，明天可能被干扰，这正是提示词「看线路」一条要求「能确认走国内节点」的原因；被 DNS 污染的（如 `www.google.com` 解析到 Twitter 的地址）也在这一关挡掉。学术出版商（v2fly `category-scholar-!cn`）不要求国内节点：学校订阅按出口 IP 认证，要直连。这里的国家只用来认「是不是大陆节点」，不用来估远近（见下面「为什么」一段）。
 2. **测速**（`evidence.speed`）：直连与走代理（Clash 的 mixed-port）交替各测 3 次首字节时间取中位数；直连用腾讯 DoH 解析并扣掉解析时间（Clash 的 `direct-nameserver` 也是 223.5.5.5 / 1.12.12.12，测到的就是改直连后实际会连的节点）。直连连不上、不比代理快（直连 > 代理 × 0.8）、国内解析不到的隐藏，不问模型。结果挂在 `var/evidence_cache.json` 该主机的 `speed` 字段。
-3. **按策略问模型**：过了测速的，按提示词笔记的策略（清单「可改直连」，结论 direct / proxy / reject）判断该不该直连，结果存 `var/advice.json` 的 `todirect:主机`。涉及登录、支付、个人数据或有地区限制的保持代理；属于拉黑一节的（如出口 IP 探测）照样拉黑。模型建议保持代理的也隐藏。
+3. **按策略问模型**（点「为本页生成」，只问过了实测的；模型选「不用模型」时没有这一步，自己判断或交给网页 AI）：按提示词笔记的策略（清单「可改直连」，结论 direct / proxy / reject）判断该不该直连，结果存 `var/advice.json` 的 `todirect:主机`。涉及登录、支付、个人数据或有地区限制的保持代理；属于拉黑一节的（如出口 IP 探测）照样拉黑。模型建议保持代理的也隐藏。
 
-列表只剩没测的、待问模型的、建议直连或拉黑的（含分歧），最多 60 个；隐藏的连同原因可在页头展开。每行：主机名与它是什么网站（模型给的归属与用途）；第二行测速结论与近期流量；「理由」展开三层证据与模型对每个选项的理由。操作：直连（写 my-direct）、保持代理（记入 `routed_keepproxy.txt`）、拉黑（写 my-reject）。
+列表只剩没测的、过了实测还没有模型结论的、建议直连或拉黑的（含分歧），最多 60 个；隐藏的连同原因可在页头展开。每行：主机名与它是什么网站（模型给的归属与用途）；第二行测速结论与近期流量；「理由」展开三层证据与模型对每个选项的理由。操作：直连（写 my-direct）、保持代理（记入 `routed_keepproxy.txt`）、拉黑（写 my-reject）。
 
 不另测下载吞吐：2026-09-24 在三个推荐直连的主机上直连与代理各下两次、每次 4–8 MB（`archive.ubuntu.com` 的 `ls-lR.gz`、npm 的 typescript 包、jsDelivr 的 `typescript.js`），直连 1.2–7.6 MB/s、代理 0.7–2.2 MB/s，直连快 1.5–8 倍，与首字节的结论一致；每项多下几 MB 换不来新信息。
 
@@ -359,13 +359,14 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 
 ### 问哪个模型
 
-「理由」「为本页生成」「实测」问的模型由 `settings.json` 的 `model` 定，网页顶栏的「模型」也能改（写回 `settings.json`）。换了模型，已有的推荐标「已过期」，「为本页生成」时重查。
+「理由」「为本页生成」问的模型由 `settings.json` 的 `model` 定，网页顶栏的「模型」也能改（写回 `settings.json`）。换了模型，已有的推荐标「已过期」，「为本页生成」时重查。选「不用模型」（`{"provider": "none"}`）时不出现「为本页生成」，「理由」只查本机证据与名单，以前的推荐照常显示；实测不受影响。
 
 | `model` | 说明 |
 |---|---|
 | `{"provider": "codex", "model": "gpt-6-sol", "effort": "low"}`（默认） | ChatGPT 订阅，经 Codex 命令行 `codex exec`，不另付费、占订阅额度。一项约 20～30 秒、8000 多 token，并发 8。第一次用前登录：网页「模型」里点「用 ChatGPT 账号登录」，或 `python clash_review.py codex-login` |
 | `{"provider": "claude", "model": "haiku"}`（或 `sonnet`） | Claude 订阅，经本机 `claude -p`：替换默认系统提示、关工具、不读 CLAUDE.md |
 | `{"provider": "openai", "base_url": "https://api.deepseek.com", "model": "deepseek-flash", "key_file": "…"}` | 任一 OpenAI 兼容接口（DeepSeek、OpenAI、Gemini 等），按用量付费。密钥放文件里，这里只写路径（也可写 `key_env` 用环境变量） |
+| `{"provider": "none"}` | 不用模型：网页不出现「为本页生成」，「理由」只查本机证据与名单；判断自己做，或用「网页 AI」交给网页版 AI |
 
 没写 `model`、但有旧的 `deepseek_key_file` 时，沿用 DeepSeek（1.4.0 之前的设置）。
 
@@ -471,6 +472,7 @@ Codex 本是写代码的 agent，这里尽量当成裸模型用（2026-09-26 实
 
 ## 修订记录
 
+- 2026-10-01（v1.6.0）：「可改直连」打开时自动实测，实测不再连带问模型（问模型改为「为本页生成」，只问过了实测的）；模型设置加「不用模型」。原先要点「实测」、测完直接问模型，过了测速的项要等模型答完才显示，也没法不用模型。
 - 2026-10-01（v1.5.3）：命令行把文件名当网址的连接（`curl README.md Zed.md`）不再进待审，规则见「待审」一节。
 - 2026-10-01（v1.5.2）：`prompt.md` 按当天裁定评估里模型与人工不一致的项补策略（见其修订记录）；问模型时「可改直连」的说明改为已过国内节点一关。策略改了，已有推荐标「已过期」。
 - 2026-10-01（v1.5.1）：`status` 与网页顶栏报出应用包（MSIX）里的数据副本（第五节「注意事项」）。起因：从 Claude 桌面版的会话里启动的网页读写的是包里的旧副本，顶栏报「3 次提交没上线」，真实记录里早已上线。
