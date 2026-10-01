@@ -88,7 +88,7 @@ def item_message(item, no_send=None):
         raise ValueError(f"{item['host']} 在不外发名单里")
     L = []
     if item["kind"] == "todirect":
-        L.append("清单：地域放行「可改直连」（现在走代理，实测直连可用且比代理快）。结论从 direct、proxy、reject 中选。")
+        L.append("清单：地域放行「可改直连」（现在走代理，国内解析到国内节点，实测直连比代理快）。结论从 direct、proxy、reject 中选。")
         L.append(f"主机：{item['host']}")
         if item.get("count"): L.append(f"累计连接次数：{item['count']}")
     elif item["kind"] == "suspicious":
