@@ -444,13 +444,32 @@ function pendingHTML() {
   }
   return `<div class="phead"><h1>漏网待审</h1>${helpBtn()}<span class="muted" style="font-size:13px">最终落到 MATCH,REJECT 的连接 · 同一次访问带出的归在一起</span>
       <span class="grow"></span>${pendingItems().length ? aiBtn() : ''}${genHTML('pending', pendingItems().length)}${kbdHint([['↑ ↓', '选择'], ['1', '代理'], ['2', '直连'], ['3', '拉黑'], ['4', '忽略'], ['0', '撤销'], ['Space', '展开上下文'], ['?', '理由']])}</div>
-    <div class="list">${body}</div>
+    <div class="list">${body}${ignoredHTML()}</div>
     ${resultHTML(P.result, 'pending')}
     <div class="bar"><span>已选 <b class="mono">${c.chosen}</b> 项</span>
       <span style="font-size:13px;color:var(--ink2)">代理 <b class="mono" style="color:var(--teal)">${c.proxy}</b> · 直连 <b class="mono">${c.direct}</b> · 拉黑 <b class="mono" style="color:var(--crimson)">${c.reject}</b> · 忽略 <b class="mono">${c.ignore}</b></span>
       <span class="muted" style="font-size:13px">其余 ${c.rest} 项留在待审</span><span class="grow"></span>
       <button class="btn btn-ghost" data-act="p-clear" ${c.chosen ? '' : 'disabled'}>清除选择</button>
       <button class="btn btn-primary" data-act="p-apply" ${c.chosen && !P.applying ? '' : 'disabled'}>${P.applying ? '提交中…' : `应用 ${c.chosen} 项 <span class="kbd">Ctrl Enter</span>`}</button></div>`;
+}
+// 已忽略：忽略只移出待审、不写规则；这里列出可放回的，放回后照常归类（默认收起）
+function ignoredHTML() {
+  const P = S.pending; const ig = P.data?.ignored || [];
+  if (!ig.length) return '';
+  const head = `<div class="ghead"><b>已忽略</b><span>${ig.length} 项 · 只移出了待审、没写规则，放回后可重新归类</span>
+    <span class="grow"></span><button class="btn btn-ghost btn-sm" data-act="p-ig-toggle">${P.igOpen ? '收起' : '展开'}</button></div>`;
+  if (!P.igOpen) return head;
+  return head + ig.map((it) => `<div class="row r-ignored">
+    <div style="min-width:0"><div class="host">${esc(it.host)}</div>
+      <div class="sub">${it.procs.length ? `<span class="p">${esc(it.procs.join('、'))}</span> · ` : ''}忽略于 ${esc(it.time.slice(5, 16))}</div></div>
+    <span class="meta">${fmtN(it.count)} 次</span>
+    <button class="btn btn-ghost btn-sm" data-act="p-unignore" data-h="${esc(it.host)}">放回待审</button></div>`).join('');
+}
+async function pendingUnignore(host) {
+  const P = S.pending;
+  const r = await api('/api/pending/unignore', { hosts: [host] });
+  P.result = r.notes;
+  await loadPending();
 }
 function inboxRowHTML(it, same) {
   const P = S.pending; const cur = P.choice[it.host];
@@ -894,6 +913,8 @@ document.addEventListener('click', (e) => {
     render();
   }
   else if (a === 'p-clear') { P.choice = {}; render(); }
+  else if (a === 'p-ig-toggle') { P.igOpen = !P.igOpen; render(); }
+  else if (a === 'p-unignore') guard(() => pendingUnignore(h));
   else if (a === 'p-apply') guard(pendingApply);
   else if (a === 'r-view') { R.view = k; R.focus = null; R.list = null; render(); guard(loadRouted); }
   else if (a === 'r-mark') routedMark(h, k);

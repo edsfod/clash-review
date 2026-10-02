@@ -130,7 +130,15 @@ def api_pending(ctx, q):
                  else _rec(h, pending["ips"][h], "ip") for h in g]
         groups.append({"items": items, "last": max(i["last"] for i in items)})
     groups.sort(key=lambda g: g["last"], reverse=True)
-    return {"groups": groups, "domains": len(pending["domains"]), "ips": len(pending["ips"])}
+    ignored = [{"host": h, "time": v.get("time") or "", "count": (v.get("rec") or {}).get("count") or 0,
+                "procs": (v.get("rec") or {}).get("procs") or []} for h, v in cr.list_ignored(ctx)]
+    return {"groups": groups, "domains": len(pending["domains"]), "ips": len(pending["ips"]), "ignored": ignored}
+
+def api_unignore(ctx, body):
+    hosts = [h for h in body.get("hosts", []) if isinstance(h, str)]
+    if not hosts: raise ApiError("没有选择任何条目")
+    back = cr.unignore_pending(ctx, hosts)
+    return {"notes": [{"k": "放回", "cat": "", "t": f"{h}（回到待审，可重新归类）"} for h in back]}
 
 # 人工裁定日志：应用前先取快照（应用后条目就从清单里移除了），连同模型当时的推荐一起记下（见 clash_review「人工裁定日志」）
 def _advice_brief(adv, kind, host):
@@ -164,7 +172,7 @@ def api_pending_apply(ctx, body):
     notes = []
     if ignore:
         gone = cr.ignore_pending(ctx, ignore)
-        notes += [{"k": "忽略", "cat": "", "t": f"{h}（移出待审，未写规则；再出现会回来）"} for h in gone]
+        notes += [{"k": "忽略", "cat": "", "t": f"{h}（移出待审，未写规则；再出现会回来，也可在本页底部「已忽略」放回）"} for h in gone]
     for cat, kind, added, ns in out:
         name = _written_to(ctx, kind, cat)
         notes += [{"k": "写入", "cat": cat, "t": f"{name}  {e}"} for e in added]
@@ -550,7 +558,7 @@ GET = {"/api/status": api_status, "/api/pending": api_pending, "/api/suggest": a
        "/api/routed": api_routed, "/api/rules": api_rules, "/api/tidy": api_tidy,
        "/api/lists": api_lists, "/api/advice": api_advice, "/api/advice/job": api_advice_job,
        "/api/todirect": api_todirect, "/api/model": api_model}
-POST = {"/api/pending/apply": api_pending_apply, "/api/routed/apply": api_routed_apply, "/api/advice/run": api_advice_run, "/api/todirect/test": api_todirect_test, "/api/export": api_export,
+POST = {"/api/pending/apply": api_pending_apply, "/api/pending/unignore": api_unignore,"/api/routed/apply": api_routed_apply, "/api/advice/run": api_advice_run, "/api/todirect/test": api_todirect_test, "/api/export": api_export,
         "/api/rules/add": api_rules_add, "/api/rules/delete": api_rules_delete,
         "/api/rules/move": api_rules_move, "/api/tidy/apply": api_tidy_apply, "/api/tidy/merge": api_tidy_merge,
         "/api/model/set": api_model_set, "/api/model/login": api_model_login}

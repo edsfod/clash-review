@@ -97,6 +97,7 @@ nav.tabs { display: flex; gap: 2px; align-self: stretch; }
 .r-routed { grid-template-columns: max-content minmax(0,1fr) 48px 44px 80px; }
 .r-entry { grid-template-columns: minmax(0,1fr) auto; align-items: center; padding: 6px 20px; }
 .r-audit { grid-template-columns: 44px minmax(0,1fr) auto; align-items: center; padding: 6px 20px; }
+.r-ignored { grid-template-columns: minmax(0,1fr) 64px auto; align-items: center; }
 .empty { padding: 80px 20px; text-align: center; color: var(--ink3); }
 .bar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; border-top: 1px solid var(--line); background: var(--sheet); flex-shrink: 0; flex-wrap: wrap; }
 .result { display: flex; flex-direction: column; gap: 3px; padding: 10px 20px; border-top: 1px solid var(--line); background: var(--teal-soft);

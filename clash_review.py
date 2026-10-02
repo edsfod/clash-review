@@ -1984,20 +1984,109 @@ def promote(ctx, targets):
     return out, sorted(set(moved))
 
 def ignore_pending(ctx, hosts):
-    """忽略：只从待审清单移除，不写任何规则集，也不记名单——以后再出现会重新进待审。
-    用于一次性的噪声（测试站、打错的网址、命令行误把文件名当网址等）。返回实际移除的主机。"""
+    """忽略：只从待审清单移除，不写任何规则集——以后再出现会重新进待审。
+    用于一次性的噪声（测试站、打错的网址、命令行误把文件名当网址等）。被忽略时的记录存进 ignored.json，
+    忽略错了可以放回待审（unignore_pending）。返回实际移除的主机。"""
     want={h.strip() for h in hosts if h.strip()}; removed=[]
     with data_lock(ctx):
-        pending=load_pending(ctx.pending)
+        pending=load_pending(ctx.pending); ignored=load_ignored(ctx)
+        now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for sec in ("domains","ips"):
             for h in list(pending[sec]):
-                if h in want: pending[sec].pop(h); removed.append(h)
-        if removed: save_pending(ctx.pending, pending)
+                if h in want:
+                    ignored[h]={"time": now, "section": sec, "rec": _rec_to_json(pending[sec].pop(h))}
+                    removed.append(h)
+        if removed:
+            save_pending(ctx.pending, pending); save_ignored(ctx, ignored)
     return sorted(removed)
 
 def cmd_ignore(ctx, args):
     removed=ignore_pending(ctx, args.hosts.split(","))
-    print(f"已从待审移除（未写规则）: {removed}" if removed else "待审里没有这些主机。")
+    print(f"已从待审移除（未写规则，可用 unignore 放回）: {removed}" if removed else "待审里没有这些主机。")
+
+# ---------------- 已忽略（ignored.json）----------------
+# 原先忽略连记录也不留：忽略错了，只能等那个主机再被连到才回到待审，没有地方能找回它重新归类
+# （2026-10-02：用户报「忽略的无法复审」）。现在把被忽略时的记录存下来，可以列出、放回待审。
+# 列出时跳过已回到待审的（watch 又连到了）和已被规则覆盖的；超过 IGNORED_KEEP_DAYS 天的保存时清掉。
+IGNORED_KEEP_DAYS = 90
+
+def ignored_path(ctx): return os.path.join(ctx.review, "ignored.json")
+
+def _rec_to_json(r):
+    out={k: r.get(k) for k in ("count","first","last")}
+    out["ports"]=sorted(r.get("ports") or []); out["procs"]=sorted(r.get("procs") or []); out["ctx"]=list(r.get("ctx") or [])
+    return out
+
+def _rec_from_json(d, ts):
+    r=_new_rec(ts)
+    r["count"]=int(d.get("count") or 1); r["first"]=d.get("first") or ts; r["last"]=d.get("last") or ts
+    r["ports"]=set(str(p) for p in d.get("ports") or []); r["procs"]=set(d.get("procs") or []); r["ctx"]=list(d.get("ctx") or [])
+    return r
+
+def _ignored_from_decisions(ctx):
+    """ignored.json 出现之前，网页上的忽略只留在人工裁定日志里：取每个主机最后一次裁定为「忽略」的，补成已忽略记录。"""
+    last={}
+    for d in load_decisions(ctx):
+        if d.get("kind")=="pending" and d.get("host"): last[d["host"]]=d
+    out={}
+    for h, d in last.items():
+        if d.get("decision")!="ignore": continue
+        s=d.get("snapshot") or {}; t=(d.get("time") or "").replace("T"," ")
+        out[h]={"time": t, "section": "ips" if is_ip_token(h) else "domains",
+                "rec": {"count": s.get("count") or 1, "first": t, "last": t, "ports": [str(p) for p in s.get("ports") or []],
+                        "procs": s.get("procs") or [], "ctx": s.get("ctx") or []}}
+    return out
+
+def load_ignored(ctx):
+    p=ignored_path(ctx)
+    if not os.path.exists(p): return _ignored_from_decisions(ctx)
+    try:
+        with open(p, encoding="utf-8") as f: d=json.load(f)
+        return d.get("hosts", {}) if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+def save_ignored(ctx, hosts):
+    cut=(datetime.datetime.now()-datetime.timedelta(days=IGNORED_KEEP_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    keep={h: v for h, v in hosts.items() if (v.get("time") or "")>=cut}
+    _atomic_write_text(ignored_path(ctx), json.dumps({"hosts": keep}, ensure_ascii=False, indent=1)+"\n")
+
+def list_ignored(ctx):
+    """可以放回待审的已忽略主机，新的在前：[(主机, 记录)]。已回到待审、已被规则覆盖的不列。"""
+    pending=load_pending(ctx.pending); dom_c, ip_c = load_classified(ctx)
+    out=[]
+    for h, v in load_ignored(ctx).items():
+        sec=v.get("section") or ("ips" if is_ip_token(h) else "domains")
+        if h in pending[sec]: continue
+        if (ip_covered(h, ip_c) if sec=="ips" else domain_covered(h, dom_c)): continue
+        out.append((h, v))
+    out.sort(key=lambda x: x[1].get("time") or "", reverse=True)
+    return out
+
+def unignore_pending(ctx, hosts):
+    """把已忽略的主机连同当时的记录放回待审（已在待审的合并计数）。返回放回的主机。"""
+    want={h.strip() for h in hosts if h.strip()}; back=[]
+    with data_lock(ctx):
+        pending=load_pending(ctx.pending); ignored=load_ignored(ctx)
+        for h in sorted(want & set(ignored)):
+            v=ignored.pop(h); sec=v.get("section") or ("ips" if is_ip_token(h) else "domains")
+            _merge_recs(pending[sec], {h: _rec_from_json(v.get("rec") or {}, v.get("time") or "")})
+            back.append(h)
+        if back:
+            save_pending(ctx.pending, pending); save_ignored(ctx, ignored)
+    return back
+
+def cmd_ignored(ctx, args):
+    rows=list_ignored(ctx)
+    if not rows: print("没有可放回的已忽略主机。"); return
+    for h, v in rows:
+        r=v.get("rec") or {}
+        print(f"{v.get('time','')}  {h}  次数 {r.get('count')}  进程 {','.join(r.get('procs') or []) or '-'}")
+    print("放回待审：python clash_review.py unignore <主机,主机>")
+
+def cmd_unignore(ctx, args):
+    back=unignore_pending(ctx, args.hosts.split(","))
+    print(f"已放回待审: {back}" if back else "已忽略里没有这些主机。")
 
 def cmd_promote(ctx, args):
     targets={cat: getattr(args,cat).split(",") for cat in CAT_ORDER if getattr(args,cat)}
@@ -2508,6 +2597,9 @@ def main():
     pp.add_argument("--proxy",default=""); pp.add_argument("--direct",default=""); pp.add_argument("--reject",default="")
     ig=sub.add_parser("ignore", parents=[parent], help="忽略：只从待审移除，不写规则（再出现会回来）")
     ig.add_argument("hosts", help="逗号分隔的主机或 IP，须与待审里的写法一致")
+    sub.add_parser("ignored", parents=[parent], help="列出已忽略、可放回待审的主机")
+    ui=sub.add_parser("unignore", parents=[parent], help="把已忽略的主机连同当时的记录放回待审")
+    ui.add_argument("hosts", help="逗号分隔的主机或 IP")
     rj=sub.add_parser("rejects", parents=[parent], help="拉黑命中统计：各拉黑条目被连了多少次（watch 运行时累计）")
     rj.add_argument("--filter", default="", help="按子串过滤条目或主机")
     rj.add_argument("--top", type=int, default=60, help="最多显示多少条(默认60)")
@@ -2538,6 +2630,8 @@ def main():
     elif args.cmd=="routed":        cmd_routed(ctx,args)
     elif args.cmd=="promote":       cmd_promote(ctx,args)
     elif args.cmd=="ignore":        cmd_ignore(ctx,args)
+    elif args.cmd=="ignored":       cmd_ignored(ctx,args)
+    elif args.cmd=="unignore":      cmd_unignore(ctx,args)
     elif args.cmd=="tidy":          cmd_tidy(ctx,args)
     elif args.cmd=="rejects":       cmd_rejects(ctx,args)
     elif args.cmd=="traffic":       cmd_traffic(ctx,args)
