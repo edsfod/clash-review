@@ -68,6 +68,10 @@ python clash_review.py rejects --filter statsig
 python clash_review.py rejects --zero      # 另列出统计以来没有命中的拉黑条目
 python clash_review.py rejects --hours 24  # 每条下面列最近 24 小时的逐时次数
 
+# 实时看被拒的连接：排查某个网页打不开、某一步卡住时开着它再操作一遍，同一主机与规则只显示一次，
+# 写明是兜底拒绝（没收录，到待审里归类）、哪个拉黑规则集、还是内置分类。只读内核管道，不读写数据目录
+python clash_review.py live --procs msedge.exe,chrome.exe
+
 # 审查后归类（逗号分隔可多个；自动识别 IP/CIDR 与域名，分别写入 my-*.yaml / my-*-ip.yaml）
 python clash_review.py promote --proxy  a.com,b.com
 python clash_review.py promote --proxy  149.154.160.0/20
@@ -476,7 +480,7 @@ Codex 本是写代码的 agent，这里尽量当成裸模型用（2026-09-26 实
 
 ## 修订记录
 
-- 2026-10-02（v1.7.0）：忽略过的可以放回待审重新归类。原先忽略连记录也不留，忽略错了只能等那个主机再被连到才回来（用户报「忽略的无法复审」）。现在忽略时把记录存进 `var/ignored.json`；网页待审页底部加「已忽略」一栏与「放回待审」，命令行加 `ignored`、`unignore`。升级后第一次读取时，从人工裁定日志补出以前在网页上忽略的条目。加 `tests/test_ignored.py`。
+- 2026-10-02（v1.7.0）：忽略过的可以放回待审重新归类；加 `live`。原先忽略连记录也不留，忽略错了只能等那个主机再被连到才回来（用户报「忽略的无法复审」）。现在忽略时把记录存进 `var/ignored.json`；网页待审页底部加「已忽略」一栏与「放回待审」，命令行加 `ignored`、`unignore`。升级后第一次读取时，从人工裁定日志补出以前在网页上忽略的条目。另加 `live`：实时显示被拒的连接与拒绝原因（同日排查 OpenRouter 注册页「Unable to verify」，是验证脚本的域名落到兜底被拒；watch 攒批落盘，待审里看不到「刚才这一下」，用户要求把临时脚本并进来）。加 `tests/test_ignored.py`、`tests/test_live.py`。
 - 2026-10-01（v1.6.0）：「可改直连」打开时自动实测，实测不再连带问模型（问模型改为「为本页生成」，只问过了实测的）；模型设置加「不用模型」。原先要点「实测」、测完直接问模型，过了测速的项要等模型答完才显示，也没法不用模型。
 - 2026-10-01（v1.5.3）：命令行把文件名当网址的连接（`curl README.md Zed.md`）不再进待审，规则见「待审」一节。
 - 2026-10-01（v1.5.2）：`prompt.md` 按当天裁定评估里模型与人工不一致的项补策略（见其修订记录）；问模型时「可改直连」的说明改为已过国内节点一关。策略改了，已有推荐标「已过期」。

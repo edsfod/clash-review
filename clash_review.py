@@ -1556,6 +1556,52 @@ def cmd_rejects(ctx, args):
         print(f"\n统计起点以来没有命中的拉黑条目 {len(zero)} 条：")
         for e in zero: print(f"  {e}")
 
+# ---------------- 实时看被拒的连接（live）----------------
+# 排查「某个网页打不开、某一步卡住」时用：订阅内核 /logs 流，只打印被拒的连接，同一主机 + 规则只打一次，写明是哪类规则拒的。
+# watch 要攒够一批才落盘，待审清单看不到「刚才这一下」被拒了什么；拉黑命中统计也只按条目累计。
+# 只读内核管道，不读写数据目录，所以从哪里启动都行（包括 MSIX 打包的应用里）。
+# 由来：2026-10-02 注册 OpenRouter 时，验证脚本的域名落到兜底被拒，页面只报「Unable to verify」，临时写脚本盯日志才找到。
+LIVE_RE=re.compile(r'(?:\(([^)]*)\)\s*)?-->\s*(\S+):(\d+)\s+match\s+(.+?)\s+using\s+REJECT\b')
+
+def parse_reject(payload):
+    """日志里一条被拒的连接 → (进程, 主机, 端口, 规则)；不是被拒的返回 None。进程没记下时为 ""。"""
+    m=LIVE_RE.search(payload)
+    return None if m is None else (m.group(1) or "", m.group(2), m.group(3), m.group(4))
+
+def reject_reason(rule):
+    if rule=="Match": return "兜底拒绝（没有收录）：到待审里归类"
+    m=re.fullmatch(r'RuleSet\((.+)\)', rule)
+    if m: return f"拉黑规则集 {m.group(1)}"
+    m=re.fullmatch(r'GeoSite\((.+)\)', rule)
+    if m: return f"内置分类 {m.group(1)}"
+    return rule
+
+def cmd_live(ctx, args):
+    procs={p.strip().lower() for p in (args.procs or "").split(",") if p.strip()}
+    seen=collections.Counter(); backoff=1; said=""
+    print(f"实时显示被拒的连接{'（只看 ' + '、'.join(sorted(procs)) + '）' if procs else ''}，同一主机与规则只显示一次，Ctrl+C 结束。", flush=True)
+    try:
+        while True:
+            pipes=find_core_pipes()
+            if not pipes:
+                if said!="nopipe": print("找不到内核管道（Clash Verge 没在运行？），等它出现……", flush=True); said="nopipe"
+                time.sleep(backoff); backoff=min(backoff*2, 30); continue
+            said=""; backoff=1
+            try:
+                for payload in iter_log_stream(pipes[0]):
+                    r=parse_reject(payload)
+                    if r is None: continue
+                    proc, host, port, rule = r
+                    if procs and proc.lower() not in procs: continue
+                    seen[(host, rule)]+=1
+                    if seen[(host, rule)]>1 and not args.repeat: continue
+                    print(f"{datetime.datetime.now():%H:%M:%S}  {proc or '?':<18} {host}:{port}  {reject_reason(rule)}", flush=True)
+            except OSError as e:
+                print(f"管道断开（{e}），重连……", flush=True)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
 # ---------------- 流量统计（var/traffic.json）----------------
 # 日志流不带字节数。watch 另起一个线程每 TRAFFIC_POLL 秒经内核管道取一次 /connections（约 1 毫秒），
 # 记下每个连接最近一次的上传 / 下载累计值；连接从列表里消失时，按最后一次看到的值计入该主机。
@@ -2598,6 +2644,9 @@ def main():
     ig=sub.add_parser("ignore", parents=[parent], help="忽略：只从待审移除，不写规则（再出现会回来）")
     ig.add_argument("hosts", help="逗号分隔的主机或 IP，须与待审里的写法一致")
     sub.add_parser("ignored", parents=[parent], help="列出已忽略、可放回待审的主机")
+    lv=sub.add_parser("live", parents=[parent], help="实时显示被拒的连接（排查网页打不开时用；只读内核管道）")
+    lv.add_argument("--procs", help="只看这些进程，逗号分隔，如 msedge.exe,chrome.exe")
+    lv.add_argument("--repeat", action="store_true", help="同一主机与规则每次都显示（默认只显示第一次）")
     ui=sub.add_parser("unignore", parents=[parent], help="把已忽略的主机连同当时的记录放回待审")
     ui.add_argument("hosts", help="逗号分隔的主机或 IP")
     rj=sub.add_parser("rejects", parents=[parent], help="拉黑命中统计：各拉黑条目被连了多少次（watch 运行时累计）")
@@ -2632,6 +2681,7 @@ def main():
     elif args.cmd=="ignore":        cmd_ignore(ctx,args)
     elif args.cmd=="ignored":       cmd_ignored(ctx,args)
     elif args.cmd=="unignore":      cmd_unignore(ctx,args)
+    elif args.cmd=="live":          cmd_live(ctx,args)
     elif args.cmd=="tidy":          cmd_tidy(ctx,args)
     elif args.cmd=="rejects":       cmd_rejects(ctx,args)
     elif args.cmd=="traffic":       cmd_traffic(ctx,args)
