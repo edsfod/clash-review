@@ -1,5 +1,5 @@
 {
-  "_说明": "随本工具带的其它模块副本的来历。副本是 source 在 ref 处的完整内容，不在这里改；核对与更新见 README「可迁移」。",
+  "_说明": "随本工具带的其它模块副本的来历。副本是 source 在 ref 处的完整内容，不在这里改；核对见 README「可迁移」。web-kit 2026-10-12 停止维护，source 的线上仓库已删除，这里只作来历的记录。",
   "web-kit": {
     "source": "https://github.com/edsfod/web-kit.git",
     "ref": "v1.0.0",

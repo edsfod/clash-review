@@ -1,7 +1,7 @@
 # clash-review —— Clash Verge 漏网审查工具链（域名 + IP）
 
 > 创建/重写：2026-06-26
-> 边界：只记本工具的用法、设计与由来。模型用的策略见本目录 `prompt.md`；网页的配色、显示设置与服务外壳见本目录 `web-kit/`（[web-kit](https://github.com/edsfod/web-kit) 的副本，版本见 `vendor.json`）。Clash Verge 本身怎么配不在这里。
+> 边界：只记本工具的用法、设计与由来。模型用的策略见本目录 `prompt.md`；网页的配色、显示设置与服务外壳见本目录 `web-kit/`（web-kit 原是一个独立的项目，2026-10-12 停止维护，线上仓库已删除；这份 v1.0.0 的副本现在是本工具自己的一部分，来历见 `vendor.json`）。Clash Verge 本身怎么配不在这里。
 > 仓库：https://github.com/edsfod/clash-review 。许可证：MIT（见 `LICENSE`）。
 > 失效判据：Clash Verge 不再提供内核命名管道 `verge-mihomo-*`（采集方式失效），或规则不再以 `MATCH,REJECT` 兜底（「漏网」的定义失效），或不再使用 Clash Verge 时，本篇整体失效。
 
@@ -279,7 +279,7 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 | `no_send.txt` | 不外发名单（个人，不进仓库）：调模型时不发送的主机，按后缀匹配；没有这个文件就不过滤。格式与建议收录哪几类见 `no_send.example.txt` |
 | `install_task.ps1` / `uninstall_task.ps1` | 注册 / 删除两个计划任务（纯 ASCII）；解释器由 `web-kit\find-python.ps1` 找 |
 | `prompt.md` | 模型的系统提示（对话里也可直接用，见其头部）。改策略直接改它 |
-| `web-kit/` | 网页外壳，[web-kit](https://github.com/edsfod/web-kit) 某个版本的完整副本，不在这里改 |
+| `web-kit/` | 网页外壳。web-kit v1.0.0 的完整副本，现在是本工具自己的一部分（web-kit 原是一个独立的项目，2026-10-12 停止维护，线上仓库已删除） |
 | `vendor.json` | 副本的来历：来源网址、标签、提交、tree 哈希（SWHID 格式）。核对与更新见「可迁移」 |
 | `settings.example.json` | 设置的格式样例。本机的设置在 `settings.json`（不随工具给别人） |
 
@@ -423,11 +423,9 @@ Codex 本是写代码的 agent，这里尽量当成裸模型用（2026-09-26 实
 
 整目录拷到别处单独运行已试过（2026-09-24，去掉 `var/` 与 `settings.json`）：`status` 读到本机 Clash 配置的规则集与代理组、提示词从 `prompt.md` 读、没有密钥时报清楚怎么设。
 
-副本 `web-kit/` 只和线上的 web-kit 比，不引用任何本地工作目录：
+副本 `web-kit/` 不引用任何本地工作目录。web-kit 原是一个独立的项目，2026-10-12 停止维护，线上仓库已删除，所以它不再有新版，也不再更新；`vendor.json` 里的 `source` 只作来历的记录：
 
 - 核对副本没被改过：`git rev-parse HEAD:web-kit` 应等于 `vendor.json` 里 `tree` 的哈希部分，`git status web-kit` 应无改动。
-- 查新版：`git ls-remote --tags https://github.com/edsfod/web-kit.git`。
-- 更新：`git clone --depth 1 --branch <标签> https://github.com/edsfod/web-kit.git` 到临时目录，删掉其中的 `.git/`，整个替换 `web-kit/`，改 `vendor.json`，重启服务。
 - 个人文件不进仓库（`.gitignore`）：`settings.json`、`no_send.txt`、`var/`、`portable`。平常它们也不在程序目录里（见第三节「设置与数据放在哪」）。
 - 发布：打 `v*` 标签时 GitHub Actions（`.github/workflows/release.yml`）用 `web-kit/pack.py` 打成带免安装版 Python 的 zip 挂到 Releases；只在公开项目里运行。
 
@@ -480,6 +478,7 @@ Codex 本是写代码的 agent，这里尽量当成裸模型用（2026-09-26 实
 
 ## 修订记录
 
+- 2026-10-12：web-kit（原是一个独立的项目）停止维护，线上仓库已删除。本篇里指向那个仓库的链接、查新版和更新副本的两条命令去掉；`web-kit/` 这份副本原样留着，当作本工具自己的一部分。程序没有改。
 - 2026-10-02（v1.7.0）：忽略过的可以放回待审重新归类；加 `live`。原先忽略连记录也不留，忽略错了只能等那个主机再被连到才回来（用户报「忽略的无法复审」）。现在忽略时把记录存进 `var/ignored.json`；网页待审页底部加「已忽略」一栏与「放回待审」，命令行加 `ignored`、`unignore`。升级后第一次读取时，从人工裁定日志补出以前在网页上忽略的条目。另加 `live`：实时显示被拒的连接与拒绝原因（同日排查 OpenRouter 注册页「Unable to verify」，是验证脚本的域名落到兜底被拒；watch 攒批落盘，待审里看不到「刚才这一下」，用户要求把临时脚本并进来）。加 `tests/test_ignored.py`、`tests/test_live.py`。
 - 2026-10-01（v1.6.0）：「可改直连」打开时自动实测，实测不再连带问模型（问模型改为「为本页生成」，只问过了实测的）；模型设置加「不用模型」。原先要点「实测」、测完直接问模型，过了测速的项要等模型答完才显示，也没法不用模型。
 - 2026-10-01（v1.5.3）：命令行把文件名当网址的连接（`curl README.md Zed.md`）不再进待审，规则见「待审」一节。
