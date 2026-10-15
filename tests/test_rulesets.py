@@ -9,6 +9,7 @@ import os, sys, tempfile, unittest
 _TMP = tempfile.TemporaryDirectory()
 os.environ["APPDATA"] = os.path.join(_TMP.name, "roaming")
 os.environ["LOCALAPPDATA"] = os.path.join(_TMP.name, "local")
+os.environ["USERPROFILE"] = os.environ["HOME"] = os.path.join(_TMP.name, "home")    # Codex 的数据目录在用户目录下
 os.environ.pop("CLASH_VERGE_DIR", None)
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

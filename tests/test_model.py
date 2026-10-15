@@ -65,15 +65,18 @@ class Settings(unittest.TestCase):
 
 class Codex(unittest.TestCase):
     def setUp(self):
-        self.saved = (advisor.codex_exe, advisor._codex_features, subprocess.run)
+        # 下面要在 CODEX_HOME 里建、删 auth.json：先确认它在临时目录里，碰不到本机真实的登录
+        self.assertTrue(os.path.normcase(advisor.CODEX_HOME).startswith(os.path.normcase(test_rulesets._TMP.name)), advisor.CODEX_HOME)
+        self.saved = (advisor.codex_exe, advisor._codex_features, advisor._codex_catalog, subprocess.run)
         advisor.codex_exe = lambda: "C:/codex.exe"
         advisor._codex_features = lambda exe: {"plugins", "shell_tool", "apps"}
+        advisor._codex_catalog = lambda exe: "C:/catalog.json"
         self.calls = []
         os.makedirs(advisor.CODEX_HOME, exist_ok=True)
         open(os.path.join(advisor.CODEX_HOME, "auth.json"), "w").close()
 
     def tearDown(self):
-        advisor.codex_exe, advisor._codex_features, subprocess.run = self.saved
+        advisor.codex_exe, advisor._codex_features, advisor._codex_catalog, subprocess.run = self.saved
         os.remove(os.path.join(advisor.CODEX_HOME, "auth.json"))
 
     def fake_run(self, answer, stderr="tokens used\n8,423\n"):
@@ -101,6 +104,11 @@ class Codex(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--sandbox") + 1], "read-only")
         off = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--disable"]
         self.assertEqual(sorted(off), ["apps", "plugins", "shell_tool"])             # 只关这个版本认得的
+        conf = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-c"]
+        for c in ("skills.bundled.enabled=false", "include_permissions_instructions=false",
+                  "include_environment_context=false", "include_collaboration_mode_instructions=false",
+                  'model_catalog_json="C:/catalog.json"'):
+            self.assertIn(c, conf)
 
     def test_no_answer_raises(self):
         self.fake_run(None, stderr="ERROR: unexpected status 401 Unauthorized\n")
@@ -113,6 +121,52 @@ class Codex(unittest.TestCase):
             self.assertFalse(r["ok"]); self.assertIn("codex-login", r["error"]); self.assertLess(r["seconds"], 1)   # 不退避重试
         finally:
             open(os.path.join(advisor.CODEX_HOME, "auth.json"), "w").close()
+
+
+class CodexCatalog(unittest.TestCase):
+    """交给 Codex 的模型清单去掉让它另发工具的字段；清单太旧先刷新；旧位置的登录复制到新位置。"""
+    def setUp(self):
+        self.assertTrue(os.path.normcase(advisor.CODEX_HOME).startswith(os.path.normcase(test_rulesets._TMP.name)), advisor.CODEX_HOME)
+        os.makedirs(advisor.CODEX_HOME, exist_ok=True)
+        self.saved, self.calls = subprocess.run, []
+        subprocess.run = lambda cmd, **kw: self.calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", "")
+        advisor._CODEX.pop("refreshed", None)
+        self.cache = os.path.join(advisor.CODEX_HOME, "models_cache.json")
+        with open(self.cache, "w", encoding="utf-8") as f:
+            json.dump({"fetched_at": "x", "models": [{"slug": "m1", "tool_mode": "code_mode_only", "multi_agent_version": "v2",
+                       "apply_patch_tool_type": "freeform", "experimental_supported_tools": ["clock"], "priority": 1}]}, f)
+
+    def tearDown(self):
+        subprocess.run = self.saved
+        for p in (self.cache, advisor.CODEX_CATALOG):
+            if os.path.exists(p): os.remove(p)
+
+    def test_fields_dropped(self):
+        path = advisor._codex_catalog("C:/codex.exe")
+        with open(path, encoding="utf-8") as f: d = json.load(f)
+        self.assertEqual(d, {"models": [{"slug": "m1", "experimental_supported_tools": [], "priority": 1}]})
+        self.assertEqual(self.calls, [])                                          # 清单是新的，不刷新
+
+    def test_stale_list_refreshed_once(self):
+        os.utime(self.cache, (0, 0))
+        advisor._codex_catalog("C:/codex.exe"); advisor._codex_catalog("C:/codex.exe")
+        self.assertEqual(self.calls, [["C:/codex.exe", "debug", "models"]])
+
+    def test_no_list_runs_without_catalog(self):
+        os.remove(self.cache)
+        self.assertIsNone(advisor._codex_catalog("C:/codex.exe"))
+
+    def test_old_login_copied(self):
+        old = advisor.OLD_CODEX_HOME
+        self.assertNotEqual(old, advisor.CODEX_HOME)
+        os.makedirs(old, exist_ok=True)
+        with open(os.path.join(old, "auth.json"), "w") as f: f.write("{}")
+        try:
+            if os.path.exists(os.path.join(advisor.CODEX_HOME, "auth.json")): os.remove(os.path.join(advisor.CODEX_HOME, "auth.json"))
+            self.assertTrue(advisor.codex_logged_in())
+            self.assertTrue(os.path.exists(os.path.join(old, "auth.json")))         # 复制，不动旧的
+        finally:
+            os.remove(os.path.join(old, "auth.json")); os.remove(os.path.join(advisor.CODEX_HOME, "auth.json"))
 
 
 if __name__ == "__main__":

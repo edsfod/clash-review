@@ -2573,7 +2573,7 @@ def cmd_update_lists(ctx, args):
     _append_scanlog(ctx, "update-lists done")
 
 def cmd_codex_login(ctx, args):
-    """给本工具单独的 Codex 数据目录（var/codex）登录 ChatGPT 账号：模型选 Codex 时用（见 advisor「各家接口」）。
+    """给本工具单独的 Codex 数据目录（~/.clash-review/codex，便携模式在 var/codex）登录 ChatGPT 账号：模型选 Codex 时用（见 advisor「各家接口」）。
     会打开浏览器；与 Codex 桌面版的登录互不影响。"""
     import advisor, subprocess
     os.makedirs(advisor.CODEX_HOME, exist_ok=True)

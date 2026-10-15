@@ -227,18 +227,33 @@ def _claude(model, sysmsg, usermsg, timeout, schema=None):
     text = json.dumps(out, ensure_ascii=False) if out is not None else d.get("result", "")
     return text, {"usage": d.get("usage"), "cost_usd": d.get("total_cost_usd"), "models": list(d.get("modelUsage", {}))}
 
-# Codex（ChatGPT 订阅）：codex exec 本是写代码的 agent，这里尽量把它当成裸模型用（2026-09-26 实测）：
-# - 单独的数据目录 CODEX_HOME = var/codex，单独登录一次（python clash_review.py codex-login）。
+# Codex（ChatGPT 订阅）：codex exec 本是写代码的 agent，这里尽量把它当成裸模型用（2026-09-26 实测，2026-10-15 补）：
+# - 单独的数据目录 CODEX_HOME = ~/.clash-review/codex（便携模式在 var/codex），单独登录一次（python clash_review.py codex-login）。
 #   不用 ~/.codex：那里的全局 AGENTS.md 会被带进每次调用，也没有开关能关掉（project_doc_max_bytes 只管项目里的）；
 #   单独登录是另一套凭据，不影响 Codex 桌面版的登录。
+#   不放 %LOCALAPPDATA%（1.7.1 之前在那里）：从应用包（MSIX，如 Claude 桌面版）里启动时，写 AppData 会落进包里的副本；
+#   Codex 刷新登录令牌时重写 auth.json，refresh token 用过一次就作废，包外的计划任务手里就只剩作废的那一个。
+#   用户目录不受这种重定向（Codex 自己的 ~/.codex 也在这里）。旧目录里有登录时，第一次用到时复制过来，旧目录不再用。
 # - 系统提示用 model_instructions_file 换掉 Codex 自带的；不读用户设置与规则；只读沙箱；关掉能关的功能（插件、浏览器、
-#   电脑操作、生成图片、多 agent、命令行工具等），基础开销从约 11600 token 降到约 4800；仍剩几个关不掉的内置工具，只占 token。
+#   电脑操作、生成图片、多 agent、命令行工具等）、自带 skill 的清单，不发沙盒说明、环境信息、协作模式说明。
+# - 模型清单：Codex 向服务器取来的清单（数据目录的 models_cache.json）里各模型写着 tool_mode = code_mode_only 与
+#   multi_agent_version，Codex 据此另发 code mode 与多 agent 的工具和说明（约 3400 token），--disable 管不到。
+#   每次调用交一份去掉这几项的清单（model_catalog_json）；给了它 Codex 就不再取清单，所以清单没有或超过一天时
+#   先运行 codex debug models（只取清单，不调用模型）。同一个问题计费输入从 3849 降到 316 token（2026-10-15）。
 # - 输出格式用 --output-schema 固定，最终回答写到 -o 指定的文件。
-CODEX_HOME = os.path.join(cr.DATA_DIR, "codex")
+def _codex_home():
+    if os.path.exists(os.path.join(cr.HERE, "portable")): return os.path.join(cr.DATA_DIR, "codex")
+    return os.path.join(os.path.expanduser("~"), ".clash-review", "codex")
+CODEX_HOME = _codex_home()
+OLD_CODEX_HOME = os.path.join(cr.DATA_DIR, "codex")       # 1.7.1 之前的位置
 CODEX_OFF = ["apps", "browser_use", "browser_use_external", "computer_use", "image_generation", "multi_agent", "plugins",
              "shell_tool", "unified_exec", "view_image", "skill_search", "tool_suggest", "hooks", "goals", "sleep_tool",
              "in_app_browser", "shell_snapshot", "workspace_dependencies", "memories", "remote_plugin", "code_mode_host"]
+CODEX_CATALOG = os.path.join(CODEX_HOME, "clash_review_catalog.json")
+CODEX_CATALOG_DROP = ("tool_mode", "multi_agent_version", "apply_patch_tool_type")
+CODEX_MODELS_MAX_AGE = 86400     # 秒；模型清单比这旧就先刷新
 _CODEX = {}     # 进程内缓存：exe 路径、这个版本认得的功能开关
+_CODEX_LOCK = threading.Lock()   # 并发调用时只让一个去刷新清单、写改过的清单
 
 def codex_exe():
     """settings.json 的 codex_exe 优先；其次 Codex 桌面版自带的命令行（%LOCALAPPDATA%\\OpenAI\\Codex\\bin\\<随机目录>\\codex.exe，
@@ -252,7 +267,16 @@ def codex_exe():
     if p: return p
     raise RuntimeError("找不到 Codex 命令行：装 Codex 桌面版，或在 settings.json 里写 codex_exe")
 
-def codex_logged_in(): return os.path.exists(os.path.join(CODEX_HOME, "auth.json"))
+def _migrate_codex_home():
+    """1.7.1 之前的登录在 %LOCALAPPDATA%\\clash-review\\codex：新位置还没有登录时整个复制过来（复制而不是移动：
+    从应用包里运行时，删 AppData 下的文件不一定删得到真的）。旧目录此后不再用，可以删。"""
+    if OLD_CODEX_HOME == CODEX_HOME or os.path.exists(os.path.join(CODEX_HOME, "auth.json")): return
+    if os.path.exists(os.path.join(OLD_CODEX_HOME, "auth.json")):
+        shutil.copytree(OLD_CODEX_HOME, CODEX_HOME, dirs_exist_ok=True)
+
+def codex_logged_in():
+    _migrate_codex_home()
+    return os.path.exists(os.path.join(CODEX_HOME, "auth.json"))
 
 def _codex_features(exe):
     """这个版本认得的功能开关名（codex features list）；认不得的 --disable 会让 codex 报错，所以只关认得的。"""
@@ -264,6 +288,35 @@ def _codex_features(exe):
         except Exception: names = set()
         _CODEX.update(exe=exe, features=names)
     return _CODEX["features"]
+
+def _codex_catalog(exe):
+    """改过的模型清单的路径：从 Codex 取来的清单去掉 CODEX_CATALOG_DROP 与实验工具；清单还没有时返回 None（照常调用）。"""
+    cache = os.path.join(CODEX_HOME, "models_cache.json")
+    with _CODEX_LOCK:
+        try: fresh = time.time() - os.path.getmtime(cache) < CODEX_MODELS_MAX_AGE
+        except OSError: fresh = False
+        if not fresh and _CODEX.get("refreshed") != exe:
+            _CODEX["refreshed"] = exe            # 一个进程只试一次，取不到就用旧清单
+            try:
+                subprocess.run([exe, "debug", "models"], env=dict(os.environ, CODEX_HOME=CODEX_HOME), capture_output=True,
+                               stdin=subprocess.DEVNULL, timeout=60, creationflags=_NO_WINDOW)
+            except (OSError, subprocess.SubprocessError): pass
+        try:
+            with open(cache, encoding="utf-8") as f: d = json.load(f)
+        except (OSError, ValueError): return None
+        ms = d.get("models", []) if isinstance(d, dict) else []
+        for m in ms:
+            for k in CODEX_CATALOG_DROP: m.pop(k, None)
+            m["experimental_supported_tools"] = []
+        text = json.dumps({"models": ms}, ensure_ascii=False)
+        try:
+            with open(CODEX_CATALOG, encoding="utf-8") as f:
+                if f.read() == text: return CODEX_CATALOG
+        except OSError: pass
+        fd, tmp = tempfile.mkstemp(dir=CODEX_HOME, prefix="catalog-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(text)
+        os.replace(tmp, CODEX_CATALOG)
+        return CODEX_CATALOG
 
 def codex_models():
     """ChatGPT 账号能用的模型（Codex 缓存的清单，隐藏的不列）。清单在 Codex 数据目录，第一次调用后才有。"""
@@ -278,7 +331,7 @@ def codex_models():
 def _codex(model, effort, sysmsg, usermsg, timeout, schema=None):
     if not codex_logged_in():
         raise RuntimeError("Codex 还没登录：在工具目录运行 python clash_review.py codex-login，按提示用 ChatGPT 账号登录")
-    exe = codex_exe(); known = _codex_features(exe)
+    exe = codex_exe(); known = _codex_features(exe); catalog = _codex_catalog(exe)
     d = tempfile.mkdtemp(prefix="clash-review-codex-")
     try:
         files = {"sys": os.path.join(d, "system.txt"), "schema": os.path.join(d, "schema.json"), "out": os.path.join(d, "out.txt")}
@@ -287,7 +340,10 @@ def _codex(model, effort, sysmsg, usermsg, timeout, schema=None):
         cmd = [exe, "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--ignore-user-config", "--ignore-rules",
                "-m", model, "-c", f'model_reasoning_effort="{effort}"',
                "-c", "model_instructions_file=" + json.dumps(files["sys"]), "-c", "project_doc_max_bytes=0",
-               "-c", 'web_search="disabled"',
+               "-c", 'web_search="disabled"', "-c", "skills.bundled.enabled=false",
+               "-c", "include_permissions_instructions=false", "-c", "include_environment_context=false",
+               "-c", "include_collaboration_mode_instructions=false",
+               *(["-c", "model_catalog_json=" + json.dumps(catalog)] if catalog else []),
                *[a for x in CODEX_OFF if x in known for a in ("--disable", x)],
                "--output-schema", files["schema"], "-o", files["out"], "-"]
         p = subprocess.run(cmd, cwd=d, env=dict(os.environ, CODEX_HOME=CODEX_HOME), input=usermsg, capture_output=True,

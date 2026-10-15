@@ -371,7 +371,7 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 
 | `model` | 说明 |
 |---|---|
-| `{"provider": "codex", "model": "gpt-6-sol", "effort": "low"}`（默认） | ChatGPT 订阅，经 Codex 命令行 `codex exec`，不另付费、占订阅额度。一项约 20～30 秒、8000 多 token，并发 8。第一次用前登录：网页「模型」里点「用 ChatGPT 账号登录」，或 `python clash_review.py codex-login` |
+| `{"provider": "codex", "model": "gpt-6-sol", "effort": "low"}`（默认） | ChatGPT 订阅，经 Codex 命令行 `codex exec`，不另付费、占订阅额度。一项约 20～30 秒、约 4800 token（2026-10-15），并发 8。第一次用前登录：网页「模型」里点「用 ChatGPT 账号登录」，或 `python clash_review.py codex-login` |
 | `{"provider": "claude", "model": "haiku"}`（或 `sonnet`） | Claude 订阅，经本机 `claude -p`：替换默认系统提示、关工具、不读 CLAUDE.md |
 | `{"provider": "openai", "base_url": "https://api.deepseek.com", "model": "deepseek-flash", "key_file": "…"}` | 任一 OpenAI 兼容接口（DeepSeek、OpenAI、Gemini 等），按用量付费。密钥放文件里，这里只写路径（也可写 `key_env` 用环境变量） |
 | `{"provider": "none"}` | 不用模型：网页不出现「为本页生成」，「理由」只查本机证据与名单；判断自己做，或用「网页 AI」交给网页版 AI |
@@ -379,8 +379,9 @@ watch 另写 `var/kernel_warn.log`，用来对上「代理间歇卡住」的时�
 没写 `model`、但有旧的 `deepseek_key_file` 时，沿用 DeepSeek（1.4.0 之前的设置）。
 
 Codex 本是写代码的 agent，这里尽量当成裸模型用（2026-09-26 实测）：
-- 用本工具单独的数据目录 `var/codex`（`CODEX_HOME`），单独登录一次，与 Codex 桌面版的登录互不影响。不用 `~/.codex`：那里的全局 `AGENTS.md` 会被带进每次调用，也没有开关能关掉（`project_doc_max_bytes` 只管项目里的）；只换一个空目录又没有登录（401）。
-- 系统提示用 `model_instructions_file` 换掉 Codex 自带的；不读用户设置与规则、不留会话、只读沙箱、关联网搜索；插件、浏览器、电脑操作、生成图片、多 agent、命令行工具等能关的功能都关掉（只关当前版本 `codex features list` 认得的）。基础开销从约 11600 token 降到约 4800；还剩几个关不掉的内置工具，只占 token。
+- 用本工具单独的数据目录 `~/.clash-review/codex`（`CODEX_HOME`；便携模式在 `var/codex`），单独登录一次，与 Codex 桌面版的登录互不影响。不用 `~/.codex`：那里的全局 `AGENTS.md` 会被带进每次调用，也没有开关能关掉（`project_doc_max_bytes` 只管项目里的）；只换一个空目录又没有登录（401）。不放 `%LOCALAPPDATA%`（1.7.1 之前在 `%LOCALAPPDATA%\clash-review\codex`）：从 MSIX 打包的应用里启动时写 AppData 会落进包里的副本（第五节「注意事项」），Codex 刷新登录令牌时重写 `auth.json`，而 refresh token 用过一次就作废，计划任务手里就只剩作废的那一个，只能重新登录；用户目录不受这种重定向。升级后第一次用到 Codex 时，旧目录里的登录整个复制过来，旧目录不再用，可以删。
+- 系统提示用 `model_instructions_file` 换掉 Codex 自带的；不读用户设置与规则、不留会话、只读沙箱、关联网搜索；插件、浏览器、电脑操作、生成图片、多 agent、命令行工具等能关的功能都关掉（只关当前版本 `codex features list` 认得的）；自带 skill 的清单、沙盒说明、环境信息、协作模式说明不发（`skills.bundled.enabled`、`include_*` 三个设置）。还剩一个关不掉的内置工具 `request_user_input`，约 1500 字符。
+- Codex 向服务器取来的模型清单（数据目录的 `models_cache.json`）里，各模型写着 `tool_mode: "code_mode_only"`、`multi_agent_version` 等，Codex 据此另发 code mode 与多 agent 的工具和说明，约 3400 token，关功能开关管不到。每次调用交一份去掉这几项的清单（`model_catalog_json`，存为数据目录的 `clash_review_catalog.json`）；给了它 Codex 就不再取清单，所以清单没有或超过一天时先运行 `codex debug models`（只取清单，不调用模型）。2026-10-15 实测：Codex 自己的开销从约 3800 token 降到约 300。
 - 命令行取 Codex 桌面版自带的 `%LOCALAPPDATA%\OpenAI\Codex\bin\<随机目录>\codex.exe`（桌面版更新会换目录，取最新的），其次 PATH 上的 `codex`；`settings.json` 的 `codex_exe` 可指定。另装独立的 Codex 命令行没有用：是同一个程序，照样读数据目录里的 `AGENTS.md`。
 
 ---
@@ -478,6 +479,7 @@ Codex 本是写代码的 agent，这里尽量当成裸模型用（2026-09-26 实
 
 ## 修订记录
 
+- 2026-10-15（v1.7.1）：Codex 少发约 3400 token：交一份去掉 code mode 与多 agent 设置的模型清单，不发自带 skill 的清单、沙盒说明、环境信息、协作模式说明（第四节 Codex 一段）；一项从 8000 多 token 降到约 4800。Codex 的数据目录从 `%LOCALAPPDATA%\clash-review\codex` 挪到 `~/.clash-review/codex`，旧目录里的登录第一次用到时复制过来：从 MSIX 应用里启动时，令牌刷新会写进包里的副本，计划任务就只剩作废的令牌。测试另把 `USERPROFILE` 指到临时目录，加 `CodexCatalog` 四项。
 - 2026-10-12：web-kit（原是一个独立的项目）停止维护，线上仓库已删除。本篇里指向那个仓库的链接、查新版和更新副本的两条命令去掉；`web-kit/` 这份副本原样留着，当作本工具自己的一部分。程序没有改。
 - 2026-10-02（v1.7.0）：忽略过的可以放回待审重新归类；加 `live`。原先忽略连记录也不留，忽略错了只能等那个主机再被连到才回来（用户报「忽略的无法复审」）。现在忽略时把记录存进 `var/ignored.json`；网页待审页底部加「已忽略」一栏与「放回待审」，命令行加 `ignored`、`unignore`。升级后第一次读取时，从人工裁定日志补出以前在网页上忽略的条目。另加 `live`：实时显示被拒的连接与拒绝原因（同日排查 OpenRouter 注册页「Unable to verify」，是验证脚本的域名落到兜底被拒；watch 攒批落盘，待审里看不到「刚才这一下」，用户要求把临时脚本并进来）。加 `tests/test_ignored.py`、`tests/test_live.py`。
 - 2026-10-01（v1.6.0）：「可改直连」打开时自动实测，实测不再连带问模型（问模型改为「为本页生成」，只问过了实测的）；模型设置加「不用模型」。原先要点「实测」、测完直接问模型，过了测速的项要等模型答完才显示，也没法不用模型。
