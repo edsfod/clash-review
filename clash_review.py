@@ -2148,9 +2148,12 @@ def cmd_promote(ctx, args):
     else: print("⚠ 归类后请在 Clash Verge 对相应配置【右键→重新激活】(或点🔥)生效。")
 
 # ---------------- status：配置目录与内核实际加载是否一致 ----------------
-# 内核读的是 C:\ProgramData\clash-verge-service\users\<hash>\runtime\ruleset\ 下的副本，Clash Verge
-# 「重新激活」时才复制过去。副本保留原文件的修改时间，内核 /providers/rules 的 updatedAt 即该时间，
-# 故「updatedAt 与配置目录文件的修改时间相同、条目数相同」即已同步。
+# 内核读的是 C:\ProgramData\clash-verge-service\users\<hash>\runtime\ruleset\ 下的副本。两类规则集不一样：
+# type: file（本工具写的收件箱 my-*）：Clash Verge「重新激活」时才复制过去，副本保留原文件的修改时间，
+#   内核 /providers/rules 的 updatedAt 即该时间，故「updatedAt 与配置目录文件的修改时间相同、条目数相同」即已同步。
+# type: http（线上那 12 个）：内核自己按 interval 取（本机 30 分钟），每次取回就重写 runtime 下那份副本，
+#   updatedAt 等于那份副本的修改时间（2026-10-19 在本机逐秒核对过），与配置目录里同名文件无关——那份不是内核写的，
+#   修改时间可能停在几周前。所以这一类只比条目数，见下面 providers 那一段。
 FALLBACK_HOSTS = {"iptoasn.com": "update-ipdata 下载"}  # 本工具经代理回退时要访问的域名；别的工具的写在 settings.json 的 fallback_hosts
 
 def fallback_hosts():
