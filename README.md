@@ -479,6 +479,7 @@ Codex 本是写代码的 agent，这里尽量当成裸模型用（2026-09-26 实
 
 ## 修订记录
 
+- 2026-10-29（v1.7.2）：待审里同时有 IPv4 与 IPv6 时，归类 IP 报「… are not of the same version」：规则已写入，从待审移出这一步拿两种版本的网段比较出错，待审没变（用户在网页拉黑 IPv4 时遇到，同页还有 IPv6）。移出前先比版本，与别处一致。加 `FileOnly.test_promote_ip_with_v6_pending`。
 - 2026-10-15（v1.7.1）：Codex 少发约 3400 token：交一份去掉 code mode 与多 agent 设置的模型清单，不发自带 skill 的清单、沙盒说明、环境信息、协作模式说明（第四节 Codex 一段）；一项从 8000 多 token 降到约 4800。Codex 的数据目录从 `%LOCALAPPDATA%\clash-review\codex` 挪到 `~/.clash-review/codex`，旧目录里的登录第一次用到时复制过来：从 MSIX 应用里启动时，令牌刷新会写进包里的副本，计划任务就只剩作废的令牌。测试另把 `USERPROFILE` 指到临时目录，加 `CodexCatalog` 四项。
 - 2026-10-12：web-kit（原是一个独立的项目）停止维护，线上仓库已删除。本篇里指向那个仓库的链接、查新版和更新副本的两条命令去掉；`web-kit/` 这份副本原样留着，当作本工具自己的一部分。程序没有改。
 - 2026-10-02（v1.7.0）：忽略过的可以放回待审重新归类；加 `live`。原先忽略连记录也不留，忽略错了只能等那个主机再被连到才回来（用户报「忽略的无法复审」）。现在忽略时把记录存进 `var/ignored.json`；网页待审页底部加「已忽略」一栏与「放回待审」，命令行加 `ignored`、`unignore`。升级后第一次读取时，从人工裁定日志补出以前在网页上忽略的条目。另加 `live`：实时显示被拒的连接与拒绝原因（同日排查 OpenRouter 注册页「Unable to verify」，是验证脚本的域名落到兜底被拒；watch 攒批落盘，待审里看不到「刚才这一下」，用户要求把临时脚本并进来）。加 `tests/test_ignored.py`、`tests/test_live.py`。

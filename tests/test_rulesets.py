@@ -111,6 +111,16 @@ class FileOnly(unittest.TestCase):
         self.assertEqual(out[0][2], [])
         self.assertIn("b.example.org 已被代理类现有条目覆盖，未写入", out[0][3])
 
+    def test_promote_ip_with_v6_pending(self):
+        # 待审里同时有 IPv4 与 IPv6 时，按 IPv4 移出待审不能拿两种版本比（曾报 "are not of the same version"）
+        fx = Fixture(); ctx = fx.ctx()
+        cr.save_pending(ctx.pending, {"domains": {}, "ips": {"47.129.145.98": cr._new_rec("2026-10-28 03:11:00.000"),
+                                                             "2001:4860:4864:4:8000::": cr._new_rec("2026-10-29 01:30:00.000")}})
+        out, moved = cr.promote(ctx, {"reject": ["47.129.145.98"]})
+        self.assertEqual(out[0][2], ["47.129.145.98/32"])
+        self.assertEqual(moved, ["47.129.145.98"])
+        self.assertEqual(list(cr.load_pending(ctx.pending)["ips"]), ["2001:4860:4864:4:8000::"])
+
     def test_tidy_redundant_within_inbox(self):
         fx = Fixture(files={"my-proxy": ["+.example.org", "a.example.org"]})
         rep = cr.ruleset_audit(fx.ctx())

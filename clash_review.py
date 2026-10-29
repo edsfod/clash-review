@@ -2024,7 +2024,8 @@ def promote(ctx, targets):
                 for t in ts:
                     net=parse_net(t)
                     for pk in list(pending["ips"]):
-                        if net is not None and parse_net(pk) is not None and parse_net(pk).subnet_of(net):
+                        pn=parse_net(pk)
+                        if net is not None and pn is not None and pn.version==net.version and pn.subnet_of(net):
                             pending["ips"].pop(pk,None); moved.append(pk)
         save_pending(ctx.pending, pending)
     return out, sorted(set(moved))
